@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Secure Web Intercom</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="header">
+          <div>
+            <h1>Secure Web Intercom</h1>
+            <p id="endpoint"></p>
+          </div>
+          <div class="status" id="status">Disconnected</div>
+        </div>
+
+        <form id="join-form" class="controls">
+          <label>
+            Name
+            <input id="name" name="name" autocomplete="name" required maxlength="40" placeholder="alice" />
+          </label>
+          <label>
+            Room
+            <input id="room" name="room" required maxlength="40" value="main" />
+          </label>
+          <label>
+            Room key
+            <input id="key" name="key" type="password" required placeholder="shared key" />
+          </label>
+          <button id="join-button" type="submit">Connect</button>
+          <button id="leave-button" type="button" disabled>Disconnect</button>
+        </form>
+
+        <div class="meters">
+          <div>
+            <span>Clients</span>
+            <strong id="client-count">0</strong>
+          </div>
+          <div>
+            <span>Sent</span>
+            <strong id="sent-rate">0 kbps</strong>
+          </div>
+          <div>
+            <span>Received</span>
+            <strong id="rx-rate">0 kbps</strong>
+          </div>
+          <div>
+            <span>Packets</span>
+            <strong id="packet-count">0</strong>
+          </div>
+        </div>
+
+        <section class="clients">
+          <h2>Online clients</h2>
+          <ul id="client-list"></ul>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

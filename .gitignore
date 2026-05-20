@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+certs/
+*.pdf
+extracted_pdf_text.txt
