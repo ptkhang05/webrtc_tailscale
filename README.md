@@ -6,7 +6,7 @@ This is the browser-client version of the secure LAN voice intercom. Client mach
 
 - The Python server serves a browser UI over HTTPS.
 - Browsers connect through WebSocket Secure (`wss://`).
-- Each browser captures microphone audio, converts it to 16 kHz PCM16, and sends it to the server.
+- Each browser captures microphone audio with `AudioWorklet`, requests a 16 kHz `AudioContext`, converts frames to PCM16, and sends them to the server.
 - The server relays each client's audio to the other clients in the same room.
 - Transport security comes from HTTPS/WSS. A room key is required before a client can join.
 
@@ -82,7 +82,17 @@ New-NetFirewallRule -DisplayName "Secure Web Intercom HTTPS 8443" -Direction Inb
 - Browser microphone access requires HTTPS.
 - The generated certificate is self-signed, so clients must accept the browser warning once.
 - Audio is relayed by the server; the server can access the audio stream.
-- Browser audio APIs introduce more latency than the native Python client.
+- Audio capture uses `AudioWorklet` instead of the deprecated `ScriptProcessorNode`, so capture work is isolated from the browser UI thread.
+- The client requests `AudioContext({ sampleRate: 16000 })`, letting the browser perform native resampling and anti-alias filtering instead of manual JavaScript downsampling.
+- Audio is still sent as uncompressed PCM16 over WebSocket/TCP. This is simple and measurable, but Wi-Fi loss or congestion can increase latency because TCP preserves order.
+
+## Roadmap
+
+Recommended next upgrades:
+
+1. Add browser-side Opus encoding with WebCodecs to reduce audio bandwidth from raw PCM16 toward speech-codec bitrates.
+2. Replace the WebSocket media path with WebRTC DataChannel in unordered/unreliable mode, using the Python server only for signaling.
+3. Add explicit one-way latency probes and jitter statistics to compare WebSocket/TCP against a WebRTC/UDP media path.
 
 ## Tests
 

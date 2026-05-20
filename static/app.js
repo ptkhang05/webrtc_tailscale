@@ -15,7 +15,8 @@ let socket = null;
 let audioContext = null;
 let mediaStream = null;
 let sourceNode = null;
-let processorNode = null;
+let workletNode = null;
+let silenceGainNode = null;
 let nextPlaybackTime = 0;
 let metrics = {
   sentBytes: 0,
@@ -65,7 +66,14 @@ async function connect() {
   }
 
   setStatus("Connecting", false);
-  audioContext = new AudioContext();
+  audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+  if (audioContext.audioWorklet === undefined) {
+    metrics.captureErrors += 1;
+    setStatus("AudioWorklet unavailable", false);
+    throw new Error("AudioWorklet is not supported by this browser.");
+  }
+  await audioContext.audioWorklet.addModule("/static/audio-worklet.js");
+
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -117,26 +125,34 @@ async function connect() {
 
 function startAudioCapture() {
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
-  processorNode = audioContext.createScriptProcessor(2048, 1, 1);
-  processorNode.onaudioprocess = (event) => {
+  workletNode = new AudioWorkletNode(audioContext, "intercom-capture-processor", {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  });
+  silenceGainNode = audioContext.createGain();
+  silenceGainNode.gain.value = 0;
+
+  workletNode.port.onmessage = (event) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    const input = event.inputBuffer.getChannelData(0);
-    const pcm16 = downsampleToPcm16(input, audioContext.sampleRate, TARGET_SAMPLE_RATE);
     metrics.capturedFrames += 1;
-    if (pcm16.byteLength > 0) {
+    const buffer = event.data;
+    if (buffer.byteLength > 0) {
       try {
-        socket.send(pcm16.buffer);
-        metrics.sentBytes += pcm16.byteLength;
+        socket.send(buffer);
+        metrics.sentBytes += buffer.byteLength;
         metrics.sentPackets += 1;
       } catch (error) {
         metrics.captureErrors += 1;
       }
     }
   };
-  sourceNode.connect(processorNode);
-  processorNode.connect(audioContext.destination);
+
+  sourceNode.connect(workletNode);
+  workletNode.connect(silenceGainNode);
+  silenceGainNode.connect(audioContext.destination);
 }
 
 function handleControlMessage(message) {
@@ -168,9 +184,14 @@ function disconnect(closeSocket = true) {
   }
   socket = null;
 
-  if (processorNode) {
-    processorNode.disconnect();
-    processorNode = null;
+  if (workletNode) {
+    workletNode.port.onmessage = null;
+    workletNode.disconnect();
+    workletNode = null;
+  }
+  if (silenceGainNode) {
+    silenceGainNode.disconnect();
+    silenceGainNode = null;
   }
   if (sourceNode) {
     sourceNode.disconnect();
@@ -192,48 +213,27 @@ function disconnect(closeSocket = true) {
   setStatus("Disconnected", false);
 }
 
-function downsampleToPcm16(input, inputRate, outputRate) {
-  if (inputRate === outputRate) {
-    return floatToPcm16(input);
-  }
-  const ratio = inputRate / outputRate;
-  const outputLength = Math.floor(input.length / ratio);
-  const output = new Float32Array(outputLength);
-  for (let i = 0; i < outputLength; i += 1) {
-    const start = Math.floor(i * ratio);
-    const end = Math.min(Math.floor((i + 1) * ratio), input.length);
-    let sum = 0;
-    let count = 0;
-    for (let j = start; j < end; j += 1) {
-      sum += input[j];
-      count += 1;
-    }
-    output[i] = count ? sum / count : 0;
-  }
-  return floatToPcm16(output);
-}
-
-function floatToPcm16(float32) {
-  const pcm = new Int16Array(float32.length);
-  for (let i = 0; i < float32.length; i += 1) {
-    const sample = Math.max(-1, Math.min(1, float32[i]));
-    pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-  }
-  return pcm;
-}
-
 function playPcm16(arrayBuffer) {
   if (!audioContext) {
     return;
   }
   const pcm = new Int16Array(arrayBuffer);
-  const outputLength = Math.ceil((pcm.length * audioContext.sampleRate) / TARGET_SAMPLE_RATE);
+  const outputLength =
+    audioContext.sampleRate === TARGET_SAMPLE_RATE
+      ? pcm.length
+      : Math.ceil((pcm.length * audioContext.sampleRate) / TARGET_SAMPLE_RATE);
   const audioBuffer = audioContext.createBuffer(1, outputLength, audioContext.sampleRate);
   const channel = audioBuffer.getChannelData(0);
-  const ratio = TARGET_SAMPLE_RATE / audioContext.sampleRate;
-  for (let i = 0; i < outputLength; i += 1) {
-    const sourceIndex = Math.min(Math.floor(i * ratio), pcm.length - 1);
-    channel[i] = pcm[sourceIndex] / 32768;
+  if (audioContext.sampleRate === TARGET_SAMPLE_RATE) {
+    for (let i = 0; i < pcm.length; i += 1) {
+      channel[i] = pcm[i] / 32768;
+    }
+  } else {
+    const ratio = TARGET_SAMPLE_RATE / audioContext.sampleRate;
+    for (let i = 0; i < outputLength; i += 1) {
+      const sourceIndex = Math.min(Math.floor(i * ratio), pcm.length - 1);
+      channel[i] = pcm[sourceIndex] / 32768;
+    }
   }
 
   const node = audioContext.createBufferSource();
