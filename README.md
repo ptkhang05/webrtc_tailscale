@@ -24,6 +24,12 @@ $env:WEB_INTERCOM_KEY = "change-this-demo-secret"
 python -m web_intercom.server --host 0.0.0.0 --port 8443
 ```
 
+In this example, the room key is:
+
+```text
+change-this-demo-secret
+```
+
 The server prints URLs such as:
 
 ```text
@@ -33,6 +39,31 @@ https://192.168.3.202:8443
 
 Open the LAN URL on client machines using Chrome or Edge. The first visit will show a self-signed certificate warning. Continue to the site, then allow microphone access.
 
+## Room Key
+
+The room key is the shared password that clients must enter in the browser before they can join.
+
+Set the room key on the server with an environment variable:
+
+```powershell
+$env:WEB_INTERCOM_KEY = "change-this-demo-secret"
+python -m web_intercom.server --host 0.0.0.0 --port 8443
+```
+
+Or pass it directly with `--key`:
+
+```powershell
+python -m web_intercom.server --host 0.0.0.0 --port 8443 --key "change-this-demo-secret"
+```
+
+On each browser client, enter the exact same value in the `Room key` field:
+
+```text
+change-this-demo-secret
+```
+
+Use a stronger key for real testing. Anyone on the LAN who knows the room key can join the room.
+
 ## Client Usage
 
 On each client machine:
@@ -41,7 +72,7 @@ On each client machine:
 2. Accept the browser certificate warning.
 3. Enter a display name.
 4. Keep room as `main`, or choose the same room name as the other users.
-5. Enter the same room key configured on the server.
+5. Enter the same room key configured on the server, for example `change-this-demo-secret`.
 6. Click `Connect`.
 
 Use headphones to reduce echo.
