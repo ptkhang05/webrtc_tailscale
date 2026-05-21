@@ -1,0 +1,426 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{xurl}
+\usepackage[hidelinks]{hyperref}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Secure Digital Voice Intercom System Using Python-Based Audio Streaming}
+
+\author{Minh~D.~H.~Bui\IEEEauthorrefmark{1},
+        Khang~T.~Phan\IEEEauthorrefmark{1},
+        Linh~N.~Do\IEEEauthorrefmark{1},
+        Thien~D.~Do\IEEEauthorrefmark{1},
+        Thanh~C.~Nguyen\IEEEauthorrefmark{1}\\
+        \IEEEauthorblockA{\IEEEauthorrefmark{1}School of Electrical and Electronic Engineering, Hanoi University of Science and Technology, Hanoi 100000, Vietnam.}
+}
+
+\maketitle
+
+\begin{abstract}
+This paper presents a secure digital voice intercom system implemented as a Python-based local-area network (LAN) audio relay with browser clients. The system is motivated by a practical deployment constraint: client machines should be able to join an intercom room without receiving Python source code, installing native audio software, or copying project folders. A Python server hosts an HTTPS interface and a WebSocket Secure (WSS) endpoint, while browser clients use the Web Audio API and an AudioWorklet pipeline to capture mono speech audio, packetize it as 16-kHz PCM16 frames, and transmit it to the server. The server authenticates clients using a shared room key, validates application-level audio packet headers, maintains room membership, and relays each client's audio to the other clients in the same room. To support research-oriented evaluation, the implementation measures round-trip time, estimated one-way delay, RFC 3550 inter-arrival jitter, late packet drops, playback buffer underruns, AudioWorklet callback stability, and an estimated Mean Opinion Score (MOS) derived from the ITU-T G.107 E-model. The resulting prototype demonstrates a browser-accessible secure intercom architecture with explicit measurement hooks for Quality of Service (QoS) and Quality of Experience (QoE) analysis.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Digital intercom, Python, WebSocket Secure, browser audio, AudioWorklet, QoS, QoE, MOS, LAN voice communication.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Real-time voice communication remains important in classrooms, laboratories, office buildings, factories, and control rooms where short spoken messages must be exchanged with minimal setup delay. Traditional analog intercom systems are simple but difficult to scale, secure, or instrument. By contrast, IP-based intercom systems can reuse existing network infrastructure, support software-defined access control, and expose internal performance measurements that are useful for reliability analysis.
+
+For voice communication, network delay, delay variation, loss, and playout instability directly affect perceived speech quality. Prior work on VoIP delay and jitter shows that even when average throughput is sufficient, delay variation can still degrade conversation quality \cite{ieee_voip_delay_jitter}. Large-scale conferencing studies similarly indicate that audio/video communication must be evaluated under diverse network conditions, including wireless links and congestion, rather than only under ideal LAN conditions \cite{ieee_surecall}. Packet-loss modeling for real-time services further shows that impairments should be interpreted through QoE-oriented models, not only through raw network counters \cite{ieee_packet_loss_qoe}.
+
+The project studied in this paper addresses a specific deployment problem. In many classroom or laboratory demonstrations, the server operator can configure one machine, but distributing code or executables to every client machine is inconvenient. The proposed system therefore uses the browser as the client runtime. The server is written in Python and serves both the web interface and the WSS audio relay. Each client joins through an HTTPS URL, enters a display name, room name, and room key, and then participates in full-duplex voice exchange.
+
+The design intentionally differs from a conventional RTP/UDP VoIP endpoint. The implemented media path uses WSS over TCP because it is immediately available to browsers without native installation. This choice simplifies deployment but creates an important research limitation: TCP retransmission and in-order delivery can hide packet loss while increasing latency through head-of-line blocking. Therefore, this paper evaluates not only byte rate and packet count, but also inter-arrival jitter, late packet drops, playback buffer underruns, callback stability, and MOS-oriented QoE estimates.
+
+The main contributions of this paper are as follows:
+\begin{enumerate}
+    \item a browser-accessible secure LAN intercom architecture using a Python HTTPS/WSS server and browser AudioWorklet clients;
+    \item an implementation-aligned audio packet model with stream identifier, sequence number, capture timestamp, and PCM16 payload;
+    \item a room-key admission and room-based relay model that prevents unauthenticated joining and isolates room traffic;
+    \item a QoS/QoE measurement framework based on RTT, estimated one-way delay, RFC 3550 jitter, late packet drops, underruns, callback stability, and E-model MOS estimation.
+\end{enumerate}
+
+The remainder of the paper is organized into five sections. Section II presents the methodology. Section III describes the system model. Section IV defines the experimental results framework and the measurements to be reported. Section V concludes the paper and outlines future improvements.
+
+\section{Methodology}
+
+\subsection{Design Rationale}
+
+The system is designed for a trusted LAN or Wi-Fi network in which the server machine is controlled by the room operator. The browser is selected as the client runtime because it avoids source-code distribution and supports microphone access through standardized web APIs. The Python server is responsible for HTTPS page delivery, WSS session handling, room-key verification, room state maintenance, packet validation, audio relay, and measurement aggregation. WebSocket is selected for the prototype because it provides persistent full-duplex browser--server communication and has been studied as a real-time data transport mechanism \cite{ieee_websocket_realtime}.
+
+\begin{figure}[H]
+    \centering
+    \fbox{\begin{minipage}[c][1.45in][c]{0.92\columnwidth}
+    \centering
+    Placeholder for Fig. 1.\\
+    Draw only implemented components: browser clients, HTTPS page delivery, WSS endpoint, room-key verification, room table, and audio relay.
+    \end{minipage}}
+    \caption{Implemented browser-based secure intercom architecture.}
+    \label{fig:architecture}
+\end{figure}
+
+Fig.~\ref{fig:architecture} should not include RTP, LDPC, AES-GCM packet encryption, native Python audio clients, or peer-to-peer WebRTC media paths because these components are not part of the current implementation. The deployed security boundary is browser-to-server TLS through HTTPS/WSS, with the server treated as trusted.
+
+\subsection{Browser Audio Capture and Packetization}
+
+Each browser client requests a mono audio input stream and creates an audio context targeting
+\begin{equation}
+    f_s = 16\,\mathrm{kHz}.
+    \label{eq:sample_rate}
+\end{equation}
+The target sample rate is chosen because 16-kHz speech preserves more intelligibility than narrowband 8-kHz audio while keeping the payload rate moderate for LAN demonstrations. The browser's native audio engine performs the required sample-rate conversion, avoiding a manual JavaScript downsampling loop and reducing the risk of aliasing artifacts.
+
+Audio capture is performed inside an \texttt{AudioWorkletProcessor}. This is important because the deprecated \texttt{ScriptProcessorNode} executes on the main browser thread and is vulnerable to UI scheduling delays. The AudioWorklet path isolates capture from page rendering and allows callback-interval stability to be measured.
+
+For each audio block, normalized floating-point samples $x[n]\in[-1,1]$ are converted to signed 16-bit PCM:
+\begin{equation}
+    q[n]=
+    \begin{cases}
+        \lfloor 32767x[n]\rfloor, & x[n]\geq 0,\\
+        \lceil 32768x[n]\rceil, & x[n]<0.
+    \end{cases}
+    \label{eq:pcm_quant}
+\end{equation}
+The nominal payload rate per continuously speaking client is therefore
+\begin{equation}
+    R_{\mathrm{pcm}} = f_s b_q = 16000 \times 16 = 256\,\mathrm{kbps},
+    \label{eq:pcm_rate}
+\end{equation}
+where $b_q=16$ bits/sample. This value is not presented as an optimized codec rate; it is the baseline raw PCM payload rate of the implemented prototype.
+
+Each binary audio message contains a 20-byte application header followed by PCM16 payload:
+\begin{equation}
+    P_k = [M,\,s,\,k,\,t_k,\,Q_k],
+    \label{eq:packet}
+\end{equation}
+where $M$ is the four-byte magic value \texttt{SWI1}, $s$ is a random 32-bit stream identifier, $k$ is a monotonically increasing sequence number, $t_k$ is the browser audio capture timestamp, and $Q_k$ is the PCM16 payload. This header is used for packet validation, jitter estimation, and late-drop analysis.
+
+\subsection{Room-Based Relay Model}
+
+Let $C_r(t)$ be the set of authenticated clients in room $r$ at time $t$. When a client $c_i\in C_r(t)$ sends audio packet $P_k$, the server forwards the packet to
+\begin{equation}
+    \mathcal{R}_i(t) = C_r(t)\setminus\{c_i\}.
+    \label{eq:relay_set}
+\end{equation}
+Equation~(\ref{eq:relay_set}) defines two implemented behaviors: clients in other rooms do not receive the packet, and the sender does not receive an echoed copy from the relay.
+
+If $N=|C_r(t)|$ clients in one room transmit continuously at payload rate $R_{\mathrm{pcm}}$, then the server input payload rate is
+\begin{equation}
+    R_{\mathrm{in}} = NR_{\mathrm{pcm}},
+    \label{eq:server_in}
+\end{equation}
+and the aggregate relay payload rate is
+\begin{equation}
+    R_{\mathrm{out}} = N(N-1)R_{\mathrm{pcm}}.
+    \label{eq:server_out}
+\end{equation}
+This quadratic fan-out is the primary scalability limitation of the centralized relay architecture. It also explains why bandwidth counters alone are insufficient for academic evaluation: raw PCM traffic growth is predictable from (\ref{eq:server_out}), while real voice quality depends on delay, jitter, and playout stability.
+
+\subsection{Security and Access Control}
+
+The deployed system uses HTTPS/WSS for browser-to-server transport protection. The first browser visit may show a self-signed certificate warning because the LAN server generates a local certificate for demonstration use. After the WSS connection is established, the client sends a JSON join message containing a display name, room name, and room key.
+
+Let $K_s$ be the server-configured room key and $K_c$ be the client-supplied room key. Admission is modeled as
+\begin{equation}
+    A(c)=
+    \begin{cases}
+        1, & K_c=K_s,\\
+        0, & K_c\neq K_s.
+    \end{cases}
+    \label{eq:admission}
+\end{equation}
+Only clients satisfying $A(c)=1$ are inserted into the room state. A constant-time string comparison is used by the server to reduce trivial timing leakage during key verification. The server is trusted and can inspect relayed audio; therefore, the current implementation provides encrypted transport to the server but not end-to-end encryption between browser clients. Stronger peer-to-peer security would require a different media path and signaling model, such as a WebRTC-based design \cite{ieee_webrtc_signaling_security}.
+
+\subsection{QoS and QoE Measurement Method}
+
+The implementation measures application-level QoS because the browser WSS path does not expose UDP-like packet loss directly. The browser sends lightweight QoS probes to the server and measures round-trip time:
+\begin{equation}
+    RTT = T_{\mathrm{recv}} - T_{\mathrm{send}}.
+    \label{eq:rtt}
+\end{equation}
+Without synchronized clocks across machines, one-way delay is estimated as
+\begin{equation}
+    \widehat{OWD} = \frac{RTT}{2}.
+    \label{eq:owd}
+\end{equation}
+This is a practical LAN approximation and should be interpreted as an estimate, not as a hardware timestamp measurement.
+
+Inter-arrival jitter is estimated using the RTP method specified in RFC 3550 \cite{rfc3550}. For packets $i$ and $j$, let $S_i,S_j$ be sender timestamps and $R_i,R_j$ be receiver arrival times. The relative transit-time difference is
+\begin{equation}
+    D(i,j)=(R_j-R_i)-(S_j-S_i).
+    \label{eq:dij}
+\end{equation}
+The smoothed jitter estimator is
+\begin{equation}
+    J_i = J_{i-1}+\frac{|D(i-1,i)|-J_{i-1}}{16}.
+    \label{eq:jitter}
+\end{equation}
+Although the system does not implement RTP, this estimator is used because the application packet header supplies equivalent sequence and timestamp information.
+
+Late delivery is measured because TCP/WSS may hide loss but still delay audio beyond the useful playout time. The late-drop rate is
+\begin{equation}
+    P_{\mathrm{late}} =
+    \frac{N_{\mathrm{late}}}{N_{\mathrm{rx}}+N_{\mathrm{late}}}\times100\%,
+    \label{eq:late}
+\end{equation}
+where $N_{\mathrm{late}}$ is the number of packets dropped by the browser because they arrived after the playback budget or would grow the playback queue beyond the configured bound, and $N_{\mathrm{rx}}$ is the number of valid received packets.
+
+Playback stability is represented by the playback queue, which follows the same motivation as jitter-buffer control in real-time communication: absorb timing variation without allowing delay to grow unbounded \cite{ieee_jitter_buffer_pd}. The queue estimate is
+\begin{equation}
+    Q_{\mathrm{play}}(t)=\max(0,T_{\mathrm{next}}-T_{\mathrm{ctx}}),
+    \label{eq:qplay}
+\end{equation}
+where $T_{\mathrm{next}}$ is the next scheduled audio playback time and $T_{\mathrm{ctx}}$ is the current browser audio-context time. Buffer underrun events are counted when $T_{\mathrm{ctx}}$ passes $T_{\mathrm{next}}$.
+
+For QoE interpretation, the system computes an estimated R-factor using a simplified ITU-T G.107 E-model \cite{itut_g107}:
+\begin{equation}
+    R = R_0 - I_d(D) - I_{e,\mathrm{eff}}(P_{\mathrm{late}}),
+    \label{eq:rfactor}
+\end{equation}
+where $R_0=93.2$, $D$ is the estimated playout latency, and $P_{\mathrm{late}}$ is the late-drop percentage. The delay impairment is approximated as
+\begin{equation}
+    I_d(D)=0.024D + 0.11(D-177.3)H(D-177.3),
+    \label{eq:id}
+\end{equation}
+where $H(\cdot)$ is the unit step function. The late-drop impairment is modeled as
+\begin{equation}
+    I_{e,\mathrm{eff}}=I_e+(95-I_e)\frac{P_{\mathrm{late}}}{P_{\mathrm{late}}+B_{pl}},
+    \label{eq:ieeff}
+\end{equation}
+with $I_e=0$ for raw PCM impairment and $B_{pl}=10$ as a conservative robustness parameter. Finally, the estimated MOS is mapped from $R$ by
+\begin{equation}
+    MOS = 1 + 0.035R + 7\times10^{-6}R(R-60)(100-R),
+    \label{eq:mos}
+\end{equation}
+clipped to the interval $[1,4.5]$. This MOS is an objective estimate, not a substitute for a subjective listening test.
+
+\section{System Model}
+
+\subsection{Implementation Components}
+
+The implementation consists of four component groups:
+\begin{enumerate}
+    \item \textbf{Python server}: an \texttt{aiohttp} HTTPS server that serves the browser interface and accepts WSS connections.
+    \item \textbf{Room manager}: server state that stores connected clients, rooms, display names, and WebSocket objects.
+    \item \textbf{Browser capture pipeline}: Web Audio API, AudioWorklet capture, PCM16 conversion, and WSS binary transmission.
+    \item \textbf{Browser playback and measurement pipeline}: PCM16 reconstruction, scheduled playback, QoS probing, jitter estimation, late-drop detection, underrun detection, and MOS estimation.
+\end{enumerate}
+
+The server state is
+\begin{equation}
+    S(t)=\{(id_i,name_i,room_i,ws_i,\tau_i)\}_{i=1}^{M(t)},
+    \label{eq:server_state}
+\end{equation}
+where $id_i$ is the server-assigned client identifier, $name_i$ is the display name, $room_i$ is the room, $ws_i$ is the WSS connection, and $\tau_i$ is the join timestamp.
+
+\begin{figure}[H]
+    \centering
+    \fbox{\begin{minipage}[c][1.45in][c]{0.92\columnwidth}
+    \centering
+    Placeholder for Fig. 2.\\
+    Draw the packet flow: AudioWorklet capture, SWI1 packet header, WSS upload, server validation, room relay, browser playback, QoS/QoE measurement.
+    \end{minipage}}
+    \caption{Audio packet and measurement pipeline in the implemented system.}
+    \label{fig:pipeline}
+\end{figure}
+
+\subsection{System Parameters}
+
+Table~\ref{tab:parameters} summarizes the parameters that correspond to the current implementation. The table intentionally avoids unimplemented mechanisms such as RTP transport, LDPC coding, and AES-GCM payload encryption.
+
+\begin{table}[H]
+\centering
+\caption{Implemented system parameters}
+\label{tab:parameters}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{lX}
+\toprule
+\textbf{Parameter} & \textbf{Implemented value} \\
+\midrule
+Server runtime & Python 3.12 with \texttt{aiohttp} \\
+Client runtime & Chrome/Edge browser over HTTPS \\
+Media transport & WebSocket Secure over TCP/TLS \\
+Capture engine & Web Audio API with AudioWorklet \\
+Target sample rate & 16 kHz \\
+Channels & Mono \\
+Audio sample format & Signed PCM16 \\
+Application header & 20 bytes: magic, stream ID, sequence, timestamp \\
+Default room & \texttt{main} \\
+Admission control & Shared room key \\
+Maximum audio frame & 64,000 bytes at server validation \\
+Measurement interval & Configurable, default 5 s \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Server Event Model}
+
+The server handles four event classes:
+\begin{enumerate}
+    \item \textbf{HTTPS request}: return the browser user interface.
+    \item \textbf{Join request}: verify the room key and insert the client into $S(t)$ if accepted.
+    \item \textbf{Binary audio packet}: validate the \texttt{SWI1} header and relay the packet according to (\ref{eq:relay_set}).
+    \item \textbf{Disconnect}: remove the client from $S(t)$ and update room presence.
+\end{enumerate}
+
+Malformed or unauthenticated messages are dropped and counted. This behavior is important for security evaluation because a wrong room key must not create a client state, and malformed binary data must not be relayed as audio.
+
+\subsection{Measurement Variables}
+
+Table~\ref{tab:variables} lists the variables reported by the measurement subsystem and used for the experimental analysis. These variables are selected because they describe network behavior and user-perceived playout behavior more directly than raw byte counters alone.
+
+\begin{table}[H]
+\centering
+\caption{QoS and QoE variables used for evaluation}
+\label{tab:variables}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{lX}
+\toprule
+\textbf{Variable} & \textbf{Meaning} \\
+\midrule
+$RTT$ & Browser-to-server WSS control round-trip time. \\
+$\widehat{OWD}$ & Estimated one-way delay computed as $RTT/2$. \\
+$J$ & RFC 3550 inter-arrival jitter estimator. \\
+$P_{\mathrm{late}}$ & Percentage of packets dropped due to late arrival or excessive playout queue. \\
+$Q_{\mathrm{play}}$ & Receiver-side playback queue duration. \\
+$U$ & Number and duration of playback buffer underruns. \\
+$\sigma_{\mathrm{aw}}$ & Standard deviation of AudioWorklet callback intervals. \\
+$R$ & E-model R-factor estimated from delay and late-drop impairment. \\
+$MOS$ & Objective MOS estimate mapped from $R$. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Experimental Results}
+
+\subsection{Experimental Setup}
+
+The experimental setup should use one server machine and at least two browser clients connected to the same LAN or Wi-Fi network. The server is launched with HTTPS/WSS enabled, a shared room key, and periodic measurement sampling. Each client opens the server URL, accepts the self-signed certificate warning, grants microphone permission, enters the same room name and room key, and starts speaking or playing a controlled speech signal.
+
+For reproducibility, each experiment should record:
+\begin{enumerate}
+    \item the number of clients in the room;
+    \item the access medium, e.g., Ethernet or Wi-Fi;
+    \item the network impairment condition, e.g., normal LAN, added delay, induced loss, or congested Wi-Fi;
+    \item the test duration;
+    \item summary statistics for $RTT$, $\widehat{OWD}$, $J$, $P_{\mathrm{late}}$, $U$, $Q_{\mathrm{play}}$, $R$, and $MOS$.
+\end{enumerate}
+
+The current implementation can collect these quantities during runtime. The output format used by the software is an implementation detail and is not discussed in this paper.
+
+\subsection{Functional Validation}
+
+Before reporting QoS and QoE values, the implementation must pass functional validation. Table~\ref{tab:functional} lists the minimum validation cases that correspond directly to implemented behavior.
+
+\begin{table}[H]
+\centering
+\caption{Functional validation cases}
+\label{tab:functional}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{lXl}
+\toprule
+\textbf{Case} & \textbf{Expected behavior} & \textbf{Status} \\
+\midrule
+HTTPS page access & Browser loads the intercom interface from the server. & Pass after local test \\
+Correct room key & Client joins and appears in room presence list. & To measure \\
+Wrong room key & Server rejects the join request and does not add room state. & To measure \\
+Same-room relay & Audio from one client is received by other clients in the same room. & To measure \\
+Room isolation & Clients in different rooms do not receive each other's audio. & To measure \\
+Malformed binary packet & Server rejects the packet and does not relay it. & Pass in unit test \\
+Measurement generation & QoS/QoE variables are recorded during runtime. & Pass in unit test \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{QoS Results to Report}
+
+Table~\ref{tab:qos_results} provides the result structure for the QoS experiment. The values should be filled from actual runs. No synthetic numerical results are inserted because doing so would make the evaluation misleading.
+
+\begin{table}[H]
+\centering
+\caption{QoS result table to be populated from measurement runs}
+\label{tab:qos_results}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{lXXXX}
+\toprule
+\textbf{Scenario} & \textbf{$RTT$ p95 (ms)} & \textbf{$\widehat{OWD}$ p95 (ms)} & \textbf{$J$ p95 (ms)} & \textbf{$P_{\mathrm{late}}$ (\%)} \\
+\midrule
+Normal LAN, 2 clients & -- & -- & -- & -- \\
+Normal LAN, 4 clients & -- & -- & -- & -- \\
+Wi-Fi, 2 clients & -- & -- & -- & -- \\
+Wi-Fi with induced congestion & -- & -- & -- & -- \\
+Added delay condition & -- & -- & -- & -- \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The most important expected trend is not the absolute bitrate, which follows (\ref{eq:pcm_rate})--(\ref{eq:server_out}), but whether $J$, $P_{\mathrm{late}}$, and $Q_{\mathrm{play}}$ remain bounded as the number of clients and network impairment increase. If TCP head-of-line blocking becomes significant, packet loss may not appear as missing packets at the application layer, but late-drop counts and playback queue growth should increase.
+
+\subsection{QoE Results to Report}
+
+Table~\ref{tab:qoe_results} summarizes the QoE values that should be reported after each controlled run. The MOS estimate is useful for comparing scenarios, but it must be presented as an objective model-based estimate rather than as a subjective listening score.
+
+\begin{table}[H]
+\centering
+\caption{QoE result table to be populated from measurement runs}
+\label{tab:qoe_results}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{lXXXX}
+\toprule
+\textbf{Scenario} & \textbf{Underruns/min} & \textbf{Latency p95 (ms)} & \textbf{R-factor} & \textbf{Estimated MOS} \\
+\midrule
+Normal LAN, 2 clients & -- & -- & -- & -- \\
+Normal LAN, 4 clients & -- & -- & -- & -- \\
+Wi-Fi, 2 clients & -- & -- & -- & -- \\
+Wi-Fi with induced congestion & -- & -- & -- & -- \\
+Added delay condition & -- & -- & -- & -- \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \fbox{\begin{minipage}[c][1.45in][c]{0.92\columnwidth}
+    \centering
+    Placeholder for Fig. 3.\\
+    Insert a CDF plot of RFC 3550 jitter or a bar chart comparing estimated MOS across scenarios.
+    \end{minipage}}
+    \caption{Recommended experimental plot for QoS/QoE comparison.}
+    \label{fig:results}
+\end{figure}
+
+Fig.~\ref{fig:results} should be generated from real measurement runs. A jitter CDF is preferable for showing distributional behavior, while a MOS comparison chart is useful for summarizing QoE degradation across scenarios.
+
+\subsection{Discussion}
+
+The implemented system is suitable for LAN demonstrations because it minimizes client installation cost and exposes useful QoS/QoE measurements. However, the design has three important limitations. First, PCM16 audio is uncompressed, so bandwidth grows quickly with the number of clients. Second, WSS runs over TCP; therefore, wireless loss or congestion can produce accumulated latency rather than visible packet loss. Third, the server is trusted and can access audio payloads, so the design does not provide end-to-end confidentiality between clients.
+
+These limitations define the next experimental comparison. A future WebRTC or UDP-based media path should be evaluated under the same scenarios in Tables~\ref{tab:qos_results} and~\ref{tab:qoe_results}. The central comparison should be WebSocket/PCM16 versus WebRTC/Opus under identical delay, loss, and Wi-Fi congestion conditions. Such a comparative analysis would provide a stronger research contribution than reporting a single ideal LAN run.
+
+\section{Conclusion}
+
+This paper described a secure digital voice intercom system implemented with a Python HTTPS/WSS relay and browser-based audio clients. The system satisfies the deployment requirement that client machines need only a modern browser, microphone, speaker, and LAN access to the server. The implementation uses AudioWorklet capture, 16-kHz PCM16 packetization, application-level packet headers, room-key admission, room-based relay, and browser-side playback scheduling.
+
+The main technical value of the current prototype is its measurable behavior. Instead of relying only on software counters such as byte totals and active-client counts, the system records QoS and QoE variables that are meaningful for voice communication: RTT, estimated one-way delay, RFC 3550 jitter, late packet drops, buffer underruns, callback stability, R-factor, and estimated MOS. These measurements provide the basis for controlled experiments and future protocol comparison.
+
+Future work should focus on three directions. First, browser-side Opus encoding should be added to reduce the raw PCM16 payload rate. Second, a WebRTC or UDP-based media path should be implemented to reduce TCP head-of-line blocking under lossy Wi-Fi conditions. Third, controlled impairment experiments should be conducted to compare WebSocket/PCM16 and WebRTC/Opus using the same QoS/QoE metrics.
+
+\bibliographystyle{IEEEtran}
+\bibliography{ref}
+
+\end{document}
