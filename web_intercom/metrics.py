@@ -15,6 +15,10 @@ from typing import Mapping
 MetricValue = int | float | str
 MetricRow = dict[str, MetricValue]
 
+E_MODEL_R0 = 93.2
+E_MODEL_IE_PCM16 = 0.0
+E_MODEL_BPL_NO_PLC = 10.0
+
 
 SERVER_GUIDE = {
     "timestamp": ("Timestamp", "", "Local time when the measurement row was captured."),
@@ -26,23 +30,45 @@ SERVER_GUIDE = {
     "auth_failures": ("Authentication failures", "events", "Join attempts rejected because the room key was wrong."),
     "invalid_messages": ("Invalid control messages", "events", "Malformed or unexpected text messages."),
     "rx_audio_packets": ("Audio packets received", "packets", "Binary audio packets accepted by the server."),
-    "rx_audio_bytes": ("Audio bytes received", "bytes", "Audio payload bytes received from browsers."),
+    "rx_audio_bytes": ("Audio network bytes received", "bytes", "Audio packet bytes received from browsers, including the application packet header."),
+    "rx_audio_payload_bytes": ("Audio payload bytes received", "bytes", "PCM16 audio payload bytes received from browsers, excluding the application packet header."),
     "relayed_packets": ("Audio packets relayed", "packets", "Audio packets forwarded to other clients."),
-    "relayed_bytes": ("Audio bytes relayed", "bytes", "Audio payload bytes forwarded to browsers."),
+    "relayed_bytes": ("Audio network bytes relayed", "bytes", "Audio packet bytes forwarded to browsers, including the application packet header."),
+    "relayed_payload_bytes": ("Audio payload bytes relayed", "bytes", "PCM16 payload bytes forwarded to browsers, excluding the application packet header."),
     "dropped_audio_frames": ("Dropped audio frames", "frames", "Audio frames rejected because they were empty or too large."),
-    "avg_rx_kbps": ("Average receive bitrate", "kbps", "Average server audio receive bitrate since start."),
-    "avg_relayed_kbps": ("Average relay bitrate", "kbps", "Average server audio forwarding bitrate since start."),
+    "avg_rx_kbps": ("Average receive network bitrate", "kbps", "Average server audio receive rate since start, including the application packet header."),
+    "avg_rx_payload_kbps": ("Average receive payload bitrate", "kbps", "Average server PCM16 payload receive rate since start."),
+    "avg_relayed_kbps": ("Average relay network bitrate", "kbps", "Average server audio forwarding rate since start, including the application packet header."),
+    "avg_relayed_payload_kbps": ("Average relay payload bitrate", "kbps", "Average server PCM16 payload forwarding rate since start."),
     "interval_rx_kbps": ("Interval receive bitrate", "kbps", "Audio receive bitrate during the latest interval."),
+    "interval_rx_payload_kbps": ("Interval receive payload bitrate", "kbps", "PCM16 payload receive bitrate during the latest interval."),
     "interval_relayed_kbps": ("Interval relay bitrate", "kbps", "Audio forwarding bitrate during the latest interval."),
+    "interval_relayed_payload_kbps": ("Interval relay payload bitrate", "kbps", "PCM16 payload forwarding bitrate during the latest interval."),
     "interval_rx_pps": ("Interval receive packet rate", "packets/s", "Audio packets received per second in the latest interval."),
     "interval_relayed_pps": ("Interval relay packet rate", "packets/s", "Audio packets relayed per second in the latest interval."),
     "browser_captured_frames": ("Browser captured frames", "frames", "Total microphone callback frames reported by active browsers."),
     "browser_sent_packets": ("Browser sent packets", "packets", "Total audio packets browsers report sending."),
     "browser_sent_bytes": ("Browser sent bytes", "bytes", "Total audio bytes browsers report sending."),
+    "browser_sent_payload_bytes": ("Browser sent payload bytes", "bytes", "Total PCM16 payload bytes browsers report sending."),
     "browser_received_packets": ("Browser received packets", "packets", "Total audio packets browsers report receiving."),
     "browser_received_bytes": ("Browser received bytes", "bytes", "Total audio bytes browsers report receiving."),
+    "browser_received_payload_bytes": ("Browser received payload bytes", "bytes", "Total PCM16 payload bytes browsers report receiving."),
     "browser_played_packets": ("Browser played packets", "packets", "Total received packets scheduled for speaker playback."),
     "browser_capture_errors": ("Browser capture errors", "events", "Microphone capture errors reported by browsers."),
+    "browser_malformed_audio_packets": ("Malformed browser audio packets", "packets", "Audio packets rejected by browsers because the application header was invalid."),
+    "browser_late_dropped_packets": ("Late dropped packets", "packets", "Packets browsers dropped because playback would be too late or accumulated queue delay was too high."),
+    "browser_queue_overflow_dropped_packets": ("Queue overflow drops", "packets", "Packets dropped to prevent WebSocket/TCP accumulated delay from growing the playback queue."),
+    "browser_buffer_underrun_events": ("Buffer underrun events", "events", "Times browser playback found the playout schedule had already run dry."),
+    "browser_buffer_underrun_seconds": ("Buffer underrun duration", "seconds", "Total browser playback gap duration reported by clients."),
+    "browser_max_buffer_underrun_ms": ("Max buffer underrun", "ms", "Largest single browser playback gap duration."),
+    "browser_avg_rtt_ms": ("Average RTT", "ms", "Average browser-to-server WebSocket control round-trip time."),
+    "browser_max_rtt_ms": ("Max RTT", "ms", "Largest browser-to-server WebSocket control round-trip time."),
+    "browser_avg_estimated_owd_ms": ("Average estimated OWD", "ms", "Average one-way delay estimate as RTT/2. This does not require synchronized clocks."),
+    "browser_max_jitter_ms": ("Max RFC3550 jitter", "ms", "Maximum browser-estimated inter-arrival jitter using the RFC 3550 estimator."),
+    "browser_avg_playout_latency_ms": ("Average playout latency estimate", "ms", "Estimated client-side network plus playback queue delay."),
+    "browser_avg_estimated_mos": ("Average estimated MOS", "MOS", "Average objective MOS estimate from the simplified ITU-T G.107 E-model."),
+    "browser_min_estimated_mos": ("Minimum estimated MOS", "MOS", "Worst client MOS estimate at this sample."),
+    "browser_max_callback_stddev_ms": ("Max callback stddev", "ms", "Largest browser AudioWorklet callback interval standard deviation."),
 }
 
 
@@ -51,17 +77,41 @@ CLIENT_GUIDE = {
     "name": ("Name", "", "Browser display name."),
     "room": ("Room", "", "Intercom room name."),
     "status": ("Status", "", "Whether the client is active at workbook export time."),
+    "session_duration_seconds": ("Session duration", "seconds", "Elapsed browser session time reported by the client."),
     "uptime_seconds": ("Client uptime", "seconds", "Elapsed time since this client joined."),
     "captured_frames": ("Captured frames", "frames", "Microphone callback frames captured in the browser."),
     "sent_packets": ("Sent packets", "packets", "Audio packets sent from the browser to the server."),
-    "sent_bytes": ("Sent bytes", "bytes", "Audio payload bytes sent from the browser to the server."),
+    "sent_bytes": ("Sent network bytes", "bytes", "Audio packet bytes sent from the browser to the server, including the application packet header."),
+    "sent_payload_bytes": ("Sent payload bytes", "bytes", "PCM16 payload bytes sent from the browser to the server."),
     "received_packets": ("Received packets", "packets", "Audio packets received from the server."),
-    "received_bytes": ("Received bytes", "bytes", "Audio payload bytes received from the server."),
+    "received_bytes": ("Received network bytes", "bytes", "Audio packet bytes received from the server, including the application packet header."),
+    "received_payload_bytes": ("Received payload bytes", "bytes", "PCM16 payload bytes received from the server."),
     "played_packets": ("Played packets", "packets", "Received packets scheduled for speaker playback."),
     "capture_errors": ("Capture errors", "events", "Browser-side capture/send errors."),
+    "malformed_audio_packets": ("Malformed audio packets", "packets", "Received binary messages rejected by the browser because their application header was invalid."),
+    "late_dropped_packets": ("Late dropped packets", "packets", "Received packets dropped because they missed the playback deadline or queue budget."),
+    "queue_overflow_dropped_packets": ("Queue overflow drops", "packets", "Packets dropped to cap accumulated playback queue delay."),
+    "buffer_underrun_events": ("Buffer underrun events", "events", "Times playback discovered that the scheduled playout buffer had run dry."),
+    "buffer_underrun_seconds": ("Buffer underrun duration", "seconds", "Total playback gap duration caused by buffer underruns."),
+    "max_buffer_underrun_ms": ("Max buffer underrun", "ms", "Largest single playback gap caused by an underrun."),
+    "rtt_ms": ("WebSocket RTT", "ms", "Browser-to-server control round-trip time measured with a lightweight QoS ping."),
+    "estimated_owd_ms": ("Estimated one-way delay", "ms", "Approximate browser-to-server one-way delay, computed as RTT/2 under symmetric-path assumption."),
+    "rfc3550_jitter_ms": ("RFC3550 jitter", "ms", "Inter-arrival jitter estimate computed from audio packet send and receive timestamp differences."),
+    "callback_interval_mean_ms": ("AudioWorklet callback mean", "ms", "Mean interval between AudioWorklet process callbacks in audio time."),
+    "callback_interval_stddev_ms": ("AudioWorklet callback stddev", "ms", "Standard deviation of AudioWorklet process callback intervals."),
+    "callback_interval_max_ms": ("AudioWorklet callback max", "ms", "Maximum observed AudioWorklet process callback interval."),
+    "worklet_message_interval_mean_ms": ("Worklet message mean", "ms", "Mean interval between AudioWorklet messages received by the main thread."),
+    "worklet_message_interval_stddev_ms": ("Worklet message stddev", "ms", "Standard deviation of AudioWorklet-to-main-thread message intervals."),
+    "worklet_message_interval_max_ms": ("Worklet message max", "ms", "Maximum observed AudioWorklet-to-main-thread message interval."),
     "last_sent_kbps": ("Latest send bitrate", "kbps", "Browser-calculated send bitrate in the latest UI interval."),
     "last_rx_kbps": ("Latest receive bitrate", "kbps", "Browser-calculated receive bitrate in the latest UI interval."),
     "playback_queue_seconds": ("Playback queue", "seconds", "Estimated browser playback buffer delay."),
+    "estimated_playout_latency_ms": ("Estimated playout latency", "ms", "Estimated one-way network delay plus current playback queue delay and capture quantum."),
+    "late_drop_rate_percent": ("Late drop rate", "%", "Late dropped packets divided by received packets plus late drops."),
+    "buffer_underrun_rate_per_min": ("Buffer underrun rate", "events/min", "Playback underrun events normalized by browser session duration."),
+    "r_factor": ("E-model R-factor", "score", "Simplified ITU-T G.107 R-factor estimated from delay and late/drop impairment."),
+    "estimated_mos": ("Estimated MOS", "MOS", "Estimated Mean Opinion Score mapped from the R-factor."),
+    "mos_quality": ("MOS quality", "", "Plain-language quality descriptor derived from estimated MOS."),
 }
 
 
@@ -114,15 +164,17 @@ class WebIntercomMetrics:
             if client_id in self.client_states:
                 self.client_states[client_id].active = False
 
-    def record_audio_in(self, byte_count: int) -> None:
+    def record_audio_in(self, byte_count: int, payload_byte_count: int | None = None) -> None:
         with self._lock:
             self.server_counters["rx_audio_packets"] += 1
             self.server_counters["rx_audio_bytes"] += byte_count
+            self.server_counters["rx_audio_payload_bytes"] += payload_byte_count if payload_byte_count is not None else byte_count
 
-    def record_audio_relay(self, byte_count: int) -> None:
+    def record_audio_relay(self, byte_count: int, payload_byte_count: int | None = None) -> None:
         with self._lock:
             self.server_counters["relayed_packets"] += 1
             self.server_counters["relayed_bytes"] += byte_count
+            self.server_counters["relayed_payload_bytes"] += payload_byte_count if payload_byte_count is not None else byte_count
 
     def record_client_metrics(self, client_id: str, metrics: Mapping[str, object]) -> None:
         with self._lock:
@@ -134,6 +186,8 @@ class WebIntercomMetrics:
                 for field, value in metrics.items()
                 if field in CLIENT_GUIDE
             }
+            merged = {**state.latest, **cleaned}
+            cleaned.update(derive_client_qoe_metrics(merged))
             state.latest.update(cleaned)
             state.samples.append(
                 {
@@ -163,11 +217,15 @@ class WebIntercomMetrics:
                 "invalid_messages": counters.get("invalid_messages", 0),
                 "rx_audio_packets": counters.get("rx_audio_packets", 0),
                 "rx_audio_bytes": counters.get("rx_audio_bytes", 0),
+                "rx_audio_payload_bytes": counters.get("rx_audio_payload_bytes", 0),
                 "relayed_packets": counters.get("relayed_packets", 0),
                 "relayed_bytes": counters.get("relayed_bytes", 0),
+                "relayed_payload_bytes": counters.get("relayed_payload_bytes", 0),
                 "dropped_audio_frames": counters.get("dropped_audio_frames", 0),
                 "avg_rx_kbps": kbps(counters.get("rx_audio_bytes", 0), uptime),
+                "avg_rx_payload_kbps": kbps(counters.get("rx_audio_payload_bytes", 0), uptime),
                 "avg_relayed_kbps": kbps(counters.get("relayed_bytes", 0), uptime),
+                "avg_relayed_payload_kbps": kbps(counters.get("relayed_payload_bytes", 0), uptime),
                 **browser_totals,
             }
             self._add_interval_fields(row)
@@ -188,26 +246,74 @@ class WebIntercomMetrics:
             "browser_captured_frames": 0,
             "browser_sent_packets": 0,
             "browser_sent_bytes": 0,
+            "browser_sent_payload_bytes": 0,
             "browser_received_packets": 0,
             "browser_received_bytes": 0,
+            "browser_received_payload_bytes": 0,
             "browser_played_packets": 0,
             "browser_capture_errors": 0,
+            "browser_malformed_audio_packets": 0,
+            "browser_late_dropped_packets": 0,
+            "browser_queue_overflow_dropped_packets": 0,
+            "browser_buffer_underrun_events": 0,
+            "browser_buffer_underrun_seconds": 0.0,
+            "browser_max_buffer_underrun_ms": 0.0,
+            "browser_avg_rtt_ms": 0.0,
+            "browser_max_rtt_ms": 0.0,
+            "browser_avg_estimated_owd_ms": 0.0,
+            "browser_max_jitter_ms": 0.0,
+            "browser_avg_playout_latency_ms": 0.0,
+            "browser_avg_estimated_mos": 0.0,
+            "browser_min_estimated_mos": 0.0,
+            "browser_max_callback_stddev_ms": 0.0,
         }
         mapping = {
             "captured_frames": "browser_captured_frames",
             "sent_packets": "browser_sent_packets",
             "sent_bytes": "browser_sent_bytes",
+            "sent_payload_bytes": "browser_sent_payload_bytes",
             "received_packets": "browser_received_packets",
             "received_bytes": "browser_received_bytes",
+            "received_payload_bytes": "browser_received_payload_bytes",
             "played_packets": "browser_played_packets",
             "capture_errors": "browser_capture_errors",
+            "malformed_audio_packets": "browser_malformed_audio_packets",
+            "late_dropped_packets": "browser_late_dropped_packets",
+            "queue_overflow_dropped_packets": "browser_queue_overflow_dropped_packets",
+            "buffer_underrun_events": "browser_buffer_underrun_events",
         }
+        rtt_values: list[float] = []
+        owd_values: list[float] = []
+        jitter_values: list[float] = []
+        latency_values: list[float] = []
+        mos_values: list[float] = []
+        callback_stddev_values: list[float] = []
         for client_id in active_ids:
             state = self.client_states.get(client_id)
             if state is None:
                 continue
             for source, target in mapping.items():
                 totals[target] += int(_as_float(state.latest.get(source)))
+            totals["browser_buffer_underrun_seconds"] += _as_float(state.latest.get("buffer_underrun_seconds"))
+            totals["browser_max_buffer_underrun_ms"] = max(
+                _as_float(totals["browser_max_buffer_underrun_ms"]),
+                _as_float(state.latest.get("max_buffer_underrun_ms")),
+            )
+            _append_positive(rtt_values, state.latest.get("rtt_ms"))
+            _append_positive(owd_values, state.latest.get("estimated_owd_ms"))
+            _append_positive(jitter_values, state.latest.get("rfc3550_jitter_ms"))
+            _append_positive(latency_values, state.latest.get("estimated_playout_latency_ms"))
+            _append_positive(mos_values, state.latest.get("estimated_mos"))
+            _append_positive(callback_stddev_values, state.latest.get("callback_interval_stddev_ms"))
+        totals["browser_avg_rtt_ms"] = _mean(rtt_values)
+        totals["browser_max_rtt_ms"] = _max_values(rtt_values)
+        totals["browser_avg_estimated_owd_ms"] = _mean(owd_values)
+        totals["browser_max_jitter_ms"] = _max_values(jitter_values)
+        totals["browser_avg_playout_latency_ms"] = _mean(latency_values)
+        totals["browser_avg_estimated_mos"] = _mean(mos_values)
+        totals["browser_min_estimated_mos"] = _min_values(mos_values)
+        totals["browser_max_callback_stddev_ms"] = _max_values(callback_stddev_values)
+        totals["browser_buffer_underrun_seconds"] = round(_as_float(totals["browser_buffer_underrun_seconds"]), 3)
         return totals
 
     def _add_interval_fields(self, row: MetricRow) -> None:
@@ -215,7 +321,9 @@ class WebIntercomMetrics:
         elapsed = _as_float(row["uptime_seconds"]) - _as_float(previous.get("uptime_seconds")) if previous else 0.0
         intervals = {
             "rx_audio_bytes": ("interval_rx_kbps", 8 / 1000),
+            "rx_audio_payload_bytes": ("interval_rx_payload_kbps", 8 / 1000),
             "relayed_bytes": ("interval_relayed_kbps", 8 / 1000),
+            "relayed_payload_bytes": ("interval_relayed_payload_kbps", 8 / 1000),
             "rx_audio_packets": ("interval_rx_pps", 1),
             "relayed_packets": ("interval_relayed_pps", 1),
         }
@@ -232,6 +340,81 @@ def kbps(byte_count: int | float, uptime_seconds: int | float) -> float:
     if uptime <= 0:
         return 0.0
     return round((_as_float(byte_count) * 8) / uptime / 1000, 3)
+
+
+def derive_client_qoe_metrics(metrics: Mapping[str, object]) -> MetricRow:
+    playback_queue_ms = _as_float(metrics.get("playback_queue_seconds")) * 1000
+    estimated_owd_ms = _as_float(metrics.get("estimated_owd_ms"))
+    capture_quantum_ms = _as_float(metrics.get("callback_interval_mean_ms")) or 8.0
+    estimated_playout_latency_ms = max(0.0, capture_quantum_ms + estimated_owd_ms + playback_queue_ms)
+
+    late_drops = _as_float(metrics.get("late_dropped_packets"))
+    received_packets = _as_float(metrics.get("received_packets"))
+    late_drop_rate_percent = percentage(late_drops, received_packets + late_drops)
+
+    session_duration_seconds = _as_float(metrics.get("session_duration_seconds"))
+    underrun_rate_per_min = 0.0
+    if session_duration_seconds > 0:
+        underrun_rate_per_min = _as_float(metrics.get("buffer_underrun_events")) / (session_duration_seconds / 60)
+
+    r_factor, estimated_mos = estimate_e_model(
+        delay_ms=estimated_playout_latency_ms,
+        late_drop_percent=late_drop_rate_percent,
+    )
+    return {
+        "estimated_playout_latency_ms": round(estimated_playout_latency_ms, 3),
+        "late_drop_rate_percent": round(late_drop_rate_percent, 3),
+        "buffer_underrun_rate_per_min": round(underrun_rate_per_min, 3),
+        "r_factor": round(r_factor, 3),
+        "estimated_mos": round(estimated_mos, 3),
+        "mos_quality": mos_quality_label(estimated_mos),
+    }
+
+
+def estimate_e_model(delay_ms: float, late_drop_percent: float) -> tuple[float, float]:
+    delay = max(0.0, delay_ms)
+    delay_impairment = 0.024 * delay
+    if delay > 177.3:
+        delay_impairment += 0.11 * (delay - 177.3)
+
+    packet_impairment = E_MODEL_IE_PCM16
+    loss = max(0.0, late_drop_percent)
+    if loss > 0:
+        packet_impairment += (95.0 - E_MODEL_IE_PCM16) * loss / (loss + E_MODEL_BPL_NO_PLC)
+
+    r_factor = max(0.0, min(100.0, E_MODEL_R0 - delay_impairment - packet_impairment))
+    return r_factor, r_factor_to_mos(r_factor)
+
+
+def r_factor_to_mos(r_factor: float) -> float:
+    r = max(0.0, min(100.0, _as_float(r_factor)))
+    if r <= 0:
+        return 1.0
+    if r >= 100:
+        return 4.5
+    return round(1 + 0.035 * r + 7e-6 * r * (r - 60) * (100 - r), 3)
+
+
+def mos_quality_label(mos: float) -> str:
+    value = _as_float(mos)
+    if value >= 4.3:
+        return "Excellent"
+    if value >= 4.0:
+        return "Good"
+    if value >= 3.6:
+        return "Fair"
+    if value >= 3.1:
+        return "Poor"
+    if value >= 2.6:
+        return "Bad"
+    return "Not recommended"
+
+
+def percentage(numerator: object, denominator: object) -> float:
+    value = _as_float(denominator)
+    if value <= 0:
+        return 0.0
+    return (_as_float(numerator) / value) * 100
 
 
 def write_metrics_workbook(
@@ -251,6 +434,9 @@ def write_metrics_workbook(
     workbook = Workbook()
     summary = workbook.active
     summary.title = "Summary"
+    qos_summary = workbook.create_sheet("QoS Summary")
+    qoe_summary = workbook.create_sheet("QoE Summary")
+    jitter_cdf = workbook.create_sheet("Jitter CDF")
     assessment = workbook.create_sheet("Assessment")
     client_summary = workbook.create_sheet("Client Summary")
     samples = workbook.create_sheet("Samples")
@@ -259,12 +445,16 @@ def write_metrics_workbook(
 
     latest = server_samples[-1] if server_samples else {}
     _build_summary(summary, latest, server_samples, client_states, Font, PatternFill)
+    _build_qos_summary(qos_summary, latest, server_samples, client_states, Font, PatternFill)
+    _build_qoe_summary(qoe_summary, latest, client_states, Font, PatternFill)
+    _build_jitter_cdf(jitter_cdf, client_states, LineChart, Reference, Font, PatternFill)
     _build_assessment(assessment, latest, client_states, Font, PatternFill)
     _build_client_summary(client_summary, client_states, Table, TableStyleInfo, Font, PatternFill)
     _build_samples(samples, server_samples, Table, TableStyleInfo, Font, PatternFill)
     _build_client_samples(client_samples, client_states, Table, TableStyleInfo, Font, PatternFill)
     _build_guide(guide, Font, PatternFill)
     _add_bitrate_chart(summary, samples, len(server_samples), LineChart, Reference)
+    _add_qos_chart(qos_summary, samples, len(server_samples), LineChart, Reference)
 
     for sheet in workbook.worksheets:
         sheet.sheet_view.showGridLines = False
@@ -289,15 +479,24 @@ def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clie
         ("Active rooms", _as_int(latest.get("active_rooms")), "rooms", "Rooms currently in use."),
         ("Total joins", _as_int(latest.get("join_events")), "events", "Successful browser connections."),
         ("Authentication failures", _as_int(latest.get("auth_failures")), "events", "Rejected attempts due to wrong room key."),
-        ("Audio received", _mb(latest.get("rx_audio_bytes")), "MB", "Audio payload received from browsers."),
-        ("Audio relayed", _mb(latest.get("relayed_bytes")), "MB", "Audio payload forwarded to other browsers."),
+        ("Audio received", _mb(latest.get("rx_audio_bytes")), "MB", "Audio network bytes received from browsers, including application headers."),
+        ("Audio relayed", _mb(latest.get("relayed_bytes")), "MB", "Audio network bytes forwarded to other browsers, including application headers."),
+        ("PCM payload received", _mb(latest.get("rx_audio_payload_bytes")), "MB", "PCM16 payload received from browsers, excluding application headers."),
+        ("PCM payload relayed", _mb(latest.get("relayed_payload_bytes")), "MB", "PCM16 payload forwarded to browsers, excluding application headers."),
         ("Average receive bitrate", _as_float(latest.get("avg_rx_kbps")), "kbps", "Average inbound audio rate since start."),
+        ("Average payload receive bitrate", _as_float(latest.get("avg_rx_payload_kbps")), "kbps", "Average inbound PCM16 payload rate since start."),
         ("Average relay bitrate", _as_float(latest.get("avg_relayed_kbps")), "kbps", "Average server forwarding rate since start."),
+        ("Average payload relay bitrate", _as_float(latest.get("avg_relayed_payload_kbps")), "kbps", "Average forwarded PCM16 payload rate since start."),
         ("Peak interval receive bitrate", _max(rows, "interval_rx_kbps"), "kbps", "Highest inbound audio bitrate in any measurement interval."),
         ("Peak interval relay bitrate", _max(rows, "interval_relayed_kbps"), "kbps", "Highest forwarding bitrate in any measurement interval."),
         ("Browser sent audio", _mb(latest.get("browser_sent_bytes")), "MB", "Client-reported microphone audio uploaded."),
         ("Browser received audio", _mb(latest.get("browser_received_bytes")), "MB", "Client-reported audio downloaded for playback."),
         ("Browser playback packets", _as_int(latest.get("browser_played_packets")), "packets", "Client-reported received packets scheduled for speakers."),
+        ("Estimated OWD", _as_float(latest.get("browser_avg_estimated_owd_ms")), "ms", "Latest average RTT/2 one-way delay estimate from browsers."),
+        ("Max RFC3550 jitter", _as_float(latest.get("browser_max_jitter_ms")), "ms", "Latest worst browser inter-arrival jitter estimate."),
+        ("Average estimated MOS", _as_float(latest.get("browser_avg_estimated_mos")), "MOS", "Latest objective QoE estimate from browser metrics."),
+        ("Late dropped packets", _as_int(latest.get("browser_late_dropped_packets")), "packets", "Browser packets dropped due to missed playout budget or queue pressure."),
+        ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Browser playout starvation events."),
         ("Dropped audio frames", _as_int(latest.get("dropped_audio_frames")), "frames", "Frames rejected by server validation."),
         ("Browser capture errors", _as_int(latest.get("browser_capture_errors")), "events", "Capture errors reported by browsers."),
         ("Total clients seen", len(clients), "clients", "Unique browser connections during the run."),
@@ -306,6 +505,100 @@ def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clie
         _write_row(sheet, index, row)
         if isinstance(row[1], float):
             sheet.cell(index, 2).number_format = "0.000"
+
+
+def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clients: list[ClientMetricState], font_cls: object, fill_cls: object) -> None:
+    _title(sheet, "Application-Level QoS Summary", font_cls, fill_cls)
+    headers = ["Metric", "Value", "Unit", "Interpretation"]
+    _write_row(sheet, 4, headers)
+    _style_header(sheet, "A4:D4", font_cls, fill_cls)
+
+    jitter_values = _client_sample_values(clients, "rfc3550_jitter_ms")
+    latency_values = _client_sample_values(clients, "estimated_playout_latency_ms")
+    owd_values = _client_sample_values(clients, "estimated_owd_ms")
+    callback_stddev_values = _client_sample_values(clients, "callback_interval_stddev_ms")
+    late_drops = _as_float(latest.get("browser_late_dropped_packets"))
+    received = _as_float(latest.get("browser_received_packets"))
+
+    qos_rows = [
+        ("Estimated OWD mean", _mean(owd_values), "ms", "RTT/2 approximation for the browser-to-server path; useful without synchronized LAN clocks."),
+        ("Estimated OWD p95", _percentile(owd_values, 95), "ms", "95th percentile one-way delay estimate across client metric samples."),
+        ("RFC3550 jitter mean", _mean(jitter_values), "ms", "Mean inter-arrival jitter calculated from packet timestamp spacing."),
+        ("RFC3550 jitter p95", _percentile(jitter_values, 95), "ms", "95th percentile jitter; this is more useful for paper plots than total byte counters."),
+        ("RFC3550 jitter max", _max_values(jitter_values), "ms", "Worst observed browser jitter estimate."),
+        ("Late drop rate", percentage(late_drops, received + late_drops), "%", "Packets dropped because TCP/WebSocket delivery or queue pressure missed the playback budget."),
+        ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Playback starvation events reported by browsers."),
+        ("Buffer underrun duration", _as_float(latest.get("browser_buffer_underrun_seconds")), "seconds", "Cumulative audible gap duration from browser playout underruns."),
+        ("Estimated playout latency p95", _percentile(latency_values, 95), "ms", "Approximate client playout path delay including RTT/2 and playback queue."),
+        ("AudioWorklet callback stddev max", _max_values(callback_stddev_values), "ms", "Worst callback interval instability reported by browsers."),
+        ("PCM payload efficiency", _payload_efficiency(latest), "%", "Payload bytes divided by network bytes; lower values indicate more header/control overhead."),
+    ]
+    for index, row in enumerate(qos_rows, start=5):
+        _write_row(sheet, index, row)
+        if isinstance(row[1], float):
+            sheet.cell(index, 2).number_format = "0.000"
+
+
+def _build_qoe_summary(sheet: object, latest: MetricRow, clients: list[ClientMetricState], font_cls: object, fill_cls: object) -> None:
+    _title(sheet, "QoE and E-Model Summary", font_cls, fill_cls)
+    headers = ["Metric", "Value", "Unit", "Interpretation"]
+    _write_row(sheet, 4, headers)
+    _style_header(sheet, "A4:D4", font_cls, fill_cls)
+
+    mos_values = _client_sample_values(clients, "estimated_mos")
+    r_values = _client_sample_values(clients, "r_factor")
+    latency_values = _client_sample_values(clients, "estimated_playout_latency_ms")
+    latest_mos = _as_float(latest.get("browser_avg_estimated_mos"))
+    latest_min_mos = _as_float(latest.get("browser_min_estimated_mos"))
+    quality_class = mos_quality_label(latest_mos) if latest_mos > 0 else "No data"
+    threshold_status = "No data" if latest_mos == 0 and not mos_values else ("OK" if latest_mos >= 3.6 else "Review")
+    qoe_rows = [
+        ("Average estimated MOS", _mean(mos_values) or latest_mos, "MOS", "Objective voice quality estimate mapped from the simplified ITU-T G.107 R-factor."),
+        ("Minimum estimated MOS", _min_values(mos_values) or latest_min_mos, "MOS", "Worst observed client quality estimate."),
+        ("Average R-factor", _mean(r_values), "score", "Transmission rating factor before conversion to MOS."),
+        ("Minimum R-factor", _min_values(r_values), "score", "Worst observed R-factor."),
+        ("Latency p95", _percentile(latency_values, 95), "ms", "High-percentile playout delay used for QoE interpretation."),
+        ("Latest quality class", quality_class, "", "Quality descriptor for the latest average MOS sample."),
+        ("Target threshold", 3.6, "MOS", "Fair quality threshold commonly used as a minimum acceptable intercom target."),
+        ("Threshold status", threshold_status, "", "Review if estimated MOS is below the fair-quality target."),
+    ]
+    for index, row in enumerate(qoe_rows, start=5):
+        _write_row(sheet, index, row)
+        if isinstance(row[1], float):
+            sheet.cell(index, 2).number_format = "0.000"
+
+    _write_row(sheet, 16, ["Model note"])
+    sheet["A16"].font = font_cls(bold=True)
+    sheet["A17"] = (
+        "The MOS value is an objective estimate, not a subjective listening test. "
+        "It uses measured delay, late packet drops, and a simplified ITU-T G.107 E-model mapping."
+    )
+    sheet.merge_cells("A17:D18")
+
+
+def _build_jitter_cdf(sheet: object, clients: list[ClientMetricState], chart_cls: object, reference_cls: object, font_cls: object, fill_cls: object) -> None:
+    _title(sheet, "RFC3550 Jitter CDF", font_cls, fill_cls)
+    fields = ["Percentile", "Jitter_ms"]
+    _write_row(sheet, 4, fields)
+    _style_header(sheet, "A4:B4", font_cls, fill_cls)
+    values = _client_sample_values(clients, "rfc3550_jitter_ms")
+    if not values:
+        _write_row(sheet, 5, [0, 0.0])
+        return
+
+    percentiles = [0, 5, 10, 25, 50, 75, 90, 95, 99, 100]
+    for row_index, percentile in enumerate(percentiles, start=5):
+        _write_row(sheet, row_index, [percentile, _percentile(values, percentile)])
+
+    chart = chart_cls()
+    chart.title = "Jitter CDF"
+    chart.y_axis.title = "Jitter (ms)"
+    chart.x_axis.title = "Percentile"
+    data = reference_cls(sheet, min_col=2, max_col=2, min_row=4, max_row=len(percentiles) + 4)
+    chart.add_data(data, titles_from_data=True)
+    categories = reference_cls(sheet, min_col=1, min_row=5, max_row=len(percentiles) + 4)
+    chart.set_categories(categories)
+    sheet.add_chart(chart, "D4")
 
 
 def _build_assessment(sheet: object, latest: MetricRow, clients: list[ClientMetricState], font_cls: object, fill_cls: object) -> None:
@@ -320,6 +613,10 @@ def _build_assessment(sheet: object, latest: MetricRow, clients: list[ClientMetr
     received_packets = _as_int(latest.get("browser_received_packets"))
     auth_failures = _as_int(latest.get("auth_failures"))
     capture_errors = _as_int(latest.get("browser_capture_errors"))
+    late_drops = _as_int(latest.get("browser_late_dropped_packets"))
+    underruns = _as_int(latest.get("browser_buffer_underrun_events"))
+    avg_mos = _as_float(latest.get("browser_avg_estimated_mos"))
+    jitter = _as_float(latest.get("browser_max_jitter_ms"))
     client_names = ", ".join(sorted({client.name for client in clients if client.active})) or "none"
 
     rows = [
@@ -329,6 +626,10 @@ def _build_assessment(sheet: object, latest: MetricRow, clients: list[ClientMetr
         _assessment("Audio playback", received_packets > 0, f"{received_packets} browser-reported received packet(s)", "If zero, connect another client and check browser audio output."),
         _assessment("Room-key security", auth_failures == 0, f"{auth_failures} failed authentication attempt(s)", "If non-zero, verify users entered the correct room key."),
         _assessment("Capture health", capture_errors == 0, f"{capture_errors} capture error(s)", "If non-zero, check browser microphone permissions and device availability."),
+        _assessment("Late packet behavior", late_drops == 0, f"{late_drops} browser late-drop packet(s)", "If non-zero, inspect Wi-Fi congestion or compare against a WebRTC/UDP media path."),
+        _assessment("Playout continuity", underruns == 0, f"{underruns} browser buffer underrun event(s)", "If non-zero, use the QoS and Jitter CDF sheets to quantify TCP/WebSocket delay instability."),
+        _assessment("Estimated QoE", avg_mos >= 3.6 or avg_mos == 0, f"Average estimated MOS={avg_mos:.3f}", "For IEEE-style reporting, target MOS >= 3.6 and report the model assumptions."),
+        _assessment("Jitter stability", jitter <= 30 or jitter == 0, f"Max RFC3550 jitter={jitter:.3f} ms", "If high, add controlled network-emulation scenarios and compare protocol variants."),
     ]
     for index, row in enumerate(rows, start=5):
         _write_row(sheet, index, row)
@@ -345,13 +646,33 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState], table
         "room",
         "status",
         "uptime_seconds",
+        "session_duration_seconds",
         "captured_frames",
         "sent_packets",
         "sent_bytes",
+        "sent_payload_bytes",
         "received_packets",
         "received_bytes",
+        "received_payload_bytes",
         "played_packets",
         "capture_errors",
+        "malformed_audio_packets",
+        "late_dropped_packets",
+        "queue_overflow_dropped_packets",
+        "buffer_underrun_events",
+        "buffer_underrun_seconds",
+        "max_buffer_underrun_ms",
+        "rtt_ms",
+        "estimated_owd_ms",
+        "rfc3550_jitter_ms",
+        "estimated_playout_latency_ms",
+        "late_drop_rate_percent",
+        "buffer_underrun_rate_per_min",
+        "r_factor",
+        "estimated_mos",
+        "mos_quality",
+        "callback_interval_stddev_ms",
+        "worklet_message_interval_stddev_ms",
         "last_sent_kbps",
         "last_rx_kbps",
         "playback_queue_seconds",
@@ -372,22 +693,44 @@ def _build_samples(sheet: object, rows: list[MetricRow], table_cls: object, styl
         "invalid_messages",
         "rx_audio_packets",
         "rx_audio_bytes",
+        "rx_audio_payload_bytes",
         "relayed_packets",
         "relayed_bytes",
+        "relayed_payload_bytes",
         "dropped_audio_frames",
         "avg_rx_kbps",
+        "avg_rx_payload_kbps",
         "avg_relayed_kbps",
+        "avg_relayed_payload_kbps",
         "interval_rx_kbps",
+        "interval_rx_payload_kbps",
         "interval_relayed_kbps",
+        "interval_relayed_payload_kbps",
         "interval_rx_pps",
         "interval_relayed_pps",
         "browser_captured_frames",
         "browser_sent_packets",
         "browser_sent_bytes",
+        "browser_sent_payload_bytes",
         "browser_received_packets",
         "browser_received_bytes",
+        "browser_received_payload_bytes",
         "browser_played_packets",
         "browser_capture_errors",
+        "browser_malformed_audio_packets",
+        "browser_late_dropped_packets",
+        "browser_queue_overflow_dropped_packets",
+        "browser_buffer_underrun_events",
+        "browser_buffer_underrun_seconds",
+        "browser_max_buffer_underrun_ms",
+        "browser_avg_rtt_ms",
+        "browser_max_rtt_ms",
+        "browser_avg_estimated_owd_ms",
+        "browser_max_jitter_ms",
+        "browser_avg_playout_latency_ms",
+        "browser_avg_estimated_mos",
+        "browser_min_estimated_mos",
+        "browser_max_callback_stddev_ms",
     ]
     _write_table(sheet, fields, rows, table_cls, style_cls, font_cls, fill_cls)
 
@@ -436,13 +779,33 @@ def _client_summary_row(client: ClientMetricState) -> MetricRow:
         "room": client.room,
         "status": "active" if client.active else "disconnected",
         "uptime_seconds": round(uptime, 3),
+        "session_duration_seconds": _as_float(latest.get("session_duration_seconds")),
         "captured_frames": _as_int(latest.get("captured_frames")),
         "sent_packets": _as_int(latest.get("sent_packets")),
         "sent_bytes": _as_int(latest.get("sent_bytes")),
+        "sent_payload_bytes": _as_int(latest.get("sent_payload_bytes")),
         "received_packets": _as_int(latest.get("received_packets")),
         "received_bytes": _as_int(latest.get("received_bytes")),
+        "received_payload_bytes": _as_int(latest.get("received_payload_bytes")),
         "played_packets": _as_int(latest.get("played_packets")),
         "capture_errors": _as_int(latest.get("capture_errors")),
+        "malformed_audio_packets": _as_int(latest.get("malformed_audio_packets")),
+        "late_dropped_packets": _as_int(latest.get("late_dropped_packets")),
+        "queue_overflow_dropped_packets": _as_int(latest.get("queue_overflow_dropped_packets")),
+        "buffer_underrun_events": _as_int(latest.get("buffer_underrun_events")),
+        "buffer_underrun_seconds": _as_float(latest.get("buffer_underrun_seconds")),
+        "max_buffer_underrun_ms": _as_float(latest.get("max_buffer_underrun_ms")),
+        "rtt_ms": _as_float(latest.get("rtt_ms")),
+        "estimated_owd_ms": _as_float(latest.get("estimated_owd_ms")),
+        "rfc3550_jitter_ms": _as_float(latest.get("rfc3550_jitter_ms")),
+        "estimated_playout_latency_ms": _as_float(latest.get("estimated_playout_latency_ms")),
+        "late_drop_rate_percent": _as_float(latest.get("late_drop_rate_percent")),
+        "buffer_underrun_rate_per_min": _as_float(latest.get("buffer_underrun_rate_per_min")),
+        "r_factor": _as_float(latest.get("r_factor")),
+        "estimated_mos": _as_float(latest.get("estimated_mos")),
+        "mos_quality": str(latest.get("mos_quality") or ""),
+        "callback_interval_stddev_ms": _as_float(latest.get("callback_interval_stddev_ms")),
+        "worklet_message_interval_stddev_ms": _as_float(latest.get("worklet_message_interval_stddev_ms")),
         "last_sent_kbps": _as_float(latest.get("last_sent_kbps")),
         "last_rx_kbps": _as_float(latest.get("last_rx_kbps")),
         "playback_queue_seconds": _as_float(latest.get("playback_queue_seconds")),
@@ -456,10 +819,23 @@ def _add_bitrate_chart(summary: object, samples: object, row_count: int, chart_c
     chart.title = "Interval Bitrate Trend"
     chart.y_axis.title = "kbps"
     chart.x_axis.title = "sample"
-    for column in (16, 17):
+    for column in (20, 22):
         data = reference_cls(samples, min_col=column, max_col=column, min_row=4, max_row=row_count + 4)
         chart.add_data(data, titles_from_data=True)
     summary.add_chart(chart, "F4")
+
+
+def _add_qos_chart(qos_summary: object, samples: object, row_count: int, chart_cls: object, reference_cls: object) -> None:
+    if row_count < 2:
+        return
+    chart = chart_cls()
+    chart.title = "QoS Trend"
+    chart.y_axis.title = "ms"
+    chart.x_axis.title = "sample"
+    for column in (43, 44, 45):
+        data = reference_cls(samples, min_col=column, max_col=column, min_row=4, max_row=row_count + 4)
+        chart.add_data(data, titles_from_data=True)
+    qos_summary.add_chart(chart, "F4")
 
 
 def _title(sheet: object, title: str, font_cls: object, fill_cls: object) -> None:
@@ -526,6 +902,59 @@ def _as_int(value: object) -> int:
 
 def _mb(value: object) -> float:
     return round(_as_float(value) / 1_000_000, 3)
+
+
+def _append_positive(values: list[float], value: object) -> None:
+    number = _as_float(value)
+    if number > 0:
+        values.append(number)
+
+
+def _mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 3)
+
+
+def _max_values(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return round(max(values), 3)
+
+
+def _min_values(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return round(min(values), 3)
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 3)
+    rank = (len(ordered) - 1) * max(0.0, min(100.0, percentile)) / 100
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = rank - lower
+    return round(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction, 3)
+
+
+def _client_sample_values(clients: list[ClientMetricState], field: str) -> list[float]:
+    values: list[float] = []
+    for client in clients:
+        for sample in client.samples:
+            value = _as_float(sample.get(field))
+            if value > 0:
+                values.append(value)
+    return values
+
+
+def _payload_efficiency(latest: MetricRow) -> float:
+    payload = _as_float(latest.get("rx_audio_payload_bytes")) + _as_float(latest.get("relayed_payload_bytes"))
+    network = _as_float(latest.get("rx_audio_bytes")) + _as_float(latest.get("relayed_bytes"))
+    return round(percentage(payload, network), 3)
 
 
 def _max(rows: list[MetricRow], field: str) -> float:

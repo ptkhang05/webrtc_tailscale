@@ -88,16 +88,32 @@ python -m web_intercom.server --host 0.0.0.0 --port 8443 --stats-interval 5 --me
 
 The workbook is updated every reporting interval and contains:
 
-- `Summary`: human-readable totals such as active clients, total audio MB, average/peak bitrate, failed room-key attempts, and dropped frames.
+- `Summary`: human-readable totals for the run.
+- `QoS Summary`: application-level QoS indicators, including estimated one-way delay, RFC 3550 inter-arrival jitter, late packet drops, buffer underrun duration, and AudioWorklet callback stability.
+- `QoE Summary`: estimated R-factor and MOS values using a simplified ITU-T G.107 E-model.
+- `Jitter CDF`: percentile table and chart for RFC 3550 jitter.
 - `Assessment`: `OK` / `Review` checks with evidence and recommendations.
-- `Client Summary`: latest browser-side capture/playback metrics per connected client.
-- `Samples`: processed server-side measurement intervals, including bitrate and packet-rate columns.
+- `Client Summary`: latest browser-side capture/playback/QoS/QoE metrics per connected client.
+- `Samples`: processed server-side measurement intervals, including network bitrate, payload bitrate, packet rate, and aggregated browser QoS/QoE columns.
 - `Client Samples`: browser-reported metric samples over time.
 - `Metric Guide`: plain-language definitions for every metric.
 
 Browsers automatically send client-side measurement data to the server. You do not need to install anything on client machines.
 
 Do not keep the workbook open in Excel while the server is running. Windows may lock the file; if that happens, close Excel and the next reporting interval will retry the update.
+
+### Measurement Notes
+
+The audio packet format includes an application header with a random stream ID, a monotonically increasing sequence number, and an audio capture timestamp. Browser clients use these fields to estimate inter-arrival jitter with the RFC 3550 formula:
+
+```text
+D(i,j) = (Rj - Ri) - (Sj - Si)
+J = J + (|D(i,j)| - J) / 16
+```
+
+The browser also sends WebSocket QoS pings. The workbook reports `estimated_owd_ms` as `RTT / 2`, which is a practical LAN approximation that avoids requiring synchronized clocks between client machines. Treat it as an estimate, not a hardware timestamp measurement.
+
+For IEEE-style experiments, run the same scenario under controlled network conditions and compare results. Useful scenarios include normal LAN, added delay, added packet loss, and congested Wi-Fi. The current media path is WebSocket/TCP with PCM16; it is intentionally measurable but can accumulate delay under loss because TCP preserves ordering.
 
 ## Firewall
 
@@ -115,6 +131,7 @@ New-NetFirewallRule -DisplayName "Secure Web Intercom HTTPS 8443" -Direction Inb
 - Audio is relayed by the server; the server can access the audio stream.
 - Audio capture uses `AudioWorklet` instead of the deprecated `ScriptProcessorNode`, so capture work is isolated from the browser UI thread.
 - The client requests `AudioContext({ sampleRate: 16000 })`, letting the browser perform native resampling and anti-alias filtering instead of manual JavaScript downsampling.
+- Audio packets carry stream ID, sequence number, and capture timestamp fields so browsers can measure jitter, late drops, buffer underruns, and callback stability.
 - Audio is still sent as uncompressed PCM16 over WebSocket/TCP. This is simple and measurable, but Wi-Fi loss or congestion can increase latency because TCP preserves order.
 
 ## Roadmap

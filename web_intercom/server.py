@@ -23,6 +23,8 @@ from .metrics import WebIntercomMetrics
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8443
 MAX_AUDIO_FRAME_BYTES = 64_000
+AUDIO_PACKET_MAGIC = b"SWI1"
+AUDIO_PACKET_HEADER_BYTES = 20
 STATIC_DIR_KEY = web.AppKey("static_dir", Path)
 
 
@@ -113,12 +115,16 @@ class WebIntercomServer:
         if not data or len(data) > MAX_AUDIO_FRAME_BYTES:
             self.metrics.inc("dropped_audio_frames")
             return
-        self.metrics.record_audio_in(len(data))
+        payload_size = audio_payload_size(data)
+        if payload_size is None:
+            self.metrics.inc("dropped_audio_frames")
+            return
+        self.metrics.record_audio_in(len(data), payload_size)
         recipients = await self.room_recipients(sender.room, exclude=sender.websocket)
         for recipient in recipients:
             try:
                 await recipient.send_bytes(data)
-                self.metrics.record_audio_relay(len(data))
+                self.metrics.record_audio_relay(len(data), payload_size)
             except ConnectionError:
                 continue
 
@@ -130,6 +136,14 @@ class WebIntercomServer:
             return
         if payload.get("type") == "ping":
             await sender.websocket.send_json({"type": "pong", "time": time.time()})
+        elif payload.get("type") == "qos_ping":
+            await sender.websocket.send_json(
+                {
+                    "type": "qos_pong",
+                    "client_time_ms": payload.get("client_time_ms"),
+                    "server_time": time.time(),
+                }
+            )
         elif payload.get("type") == "metrics":
             metrics = payload.get("metrics")
             if isinstance(metrics, dict):
@@ -189,6 +203,14 @@ class WebIntercomServer:
                 f"xlsx={metrics_xlsx or 'off'}",
                 flush=True,
             )
+
+
+def audio_payload_size(data: bytes) -> int | None:
+    if len(data) <= AUDIO_PACKET_HEADER_BYTES:
+        return None
+    if data[: len(AUDIO_PACKET_MAGIC)] != AUDIO_PACKET_MAGIC:
+        return None
+    return len(data) - AUDIO_PACKET_HEADER_BYTES
 
 
 def load_room_key(value: str | None) -> str:
