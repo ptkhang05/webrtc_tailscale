@@ -27,6 +27,7 @@ class IntercomCaptureProcessor extends AudioWorkletProcessor {
         captureTimeMs: currentTime * 1000,
         callbackIntervalMs,
         sampleCount: channel.length,
+        sampleRate,
       },
       [pcm.buffer],
     );

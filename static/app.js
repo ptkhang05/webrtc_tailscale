@@ -5,6 +5,7 @@ const MIN_PLAYBACK_LEAD_SECONDS = 0.02;
 const TALK_BURST_RESET_SECONDS = 0.1;
 const MAX_PLAYBACK_QUEUE_SECONDS = 0.5;
 const QOS_PING_INTERVAL_MS = 2000;
+const MAX_PENDING_CAPTURE_SENDS = 8;
 
 const form = document.querySelector("#join-form");
 const leaveButton = document.querySelector("#leave-button");
@@ -30,6 +31,9 @@ let remoteStreams = new Map();
 let workletCallbackStats = createStats();
 let workletMessageStats = createStats();
 let lastWorkletMessageAtMs = null;
+let captureSendChain = Promise.resolve();
+let pendingCaptureSends = 0;
+let captureSessionId = 0;
 let metrics = createMetrics();
 
 endpointEl.textContent = window.location.origin;
@@ -52,6 +56,10 @@ function createMetrics() {
     bufferUnderrunEvents: 0,
     bufferUnderrunSeconds: 0,
     maxBufferUnderrunMs: 0,
+    networkLossPackets: 0,
+    resampledFrames: 0,
+    captureQueueDroppedFrames: 0,
+    audioContextSampleRate: 0,
     packets: 0,
     lastSentBytes: 0,
     lastReceivedBytes: 0,
@@ -133,8 +141,12 @@ async function connect() {
   workletCallbackStats = createStats();
   workletMessageStats = createStats();
   lastWorkletMessageAtMs = null;
+  captureSendChain = Promise.resolve();
+  pendingCaptureSends = 0;
+  captureSessionId += 1;
   setStatus("Connecting", false);
   audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+  metrics.audioContextSampleRate = audioContext.sampleRate;
   if (audioContext.audioWorklet === undefined) {
     metrics.captureErrors += 1;
     setStatus("AudioWorklet unavailable", false);
@@ -218,6 +230,8 @@ function startAudioCapture() {
       message instanceof ArrayBuffer ? audioContext.currentTime * 1000 : Number(message.captureTimeMs || 0);
     const callbackIntervalMs =
       message instanceof ArrayBuffer ? 0 : Number(message.callbackIntervalMs || 0);
+    const sourceSampleRate =
+      message instanceof ArrayBuffer ? audioContext.sampleRate : Number(message.sampleRate || audioContext.sampleRate);
     const nowMs = performance.now();
     if (lastWorkletMessageAtMs !== null) {
       addStat(workletMessageStats, nowMs - lastWorkletMessageAtMs);
@@ -226,15 +240,7 @@ function startAudioCapture() {
     addStat(workletCallbackStats, callbackIntervalMs);
     metrics.capturedFrames += 1;
     if (buffer.byteLength > 0) {
-      try {
-        const packet = buildAudioPacket(buffer, captureTimeMs);
-        socket.send(packet);
-        metrics.sentBytes += packet.byteLength;
-        metrics.sentPayloadBytes += buffer.byteLength;
-        metrics.sentPackets += 1;
-      } catch (error) {
-        metrics.captureErrors += 1;
-      }
+      enqueueCapturedAudio(buffer, captureTimeMs, sourceSampleRate);
     }
   };
 
@@ -268,6 +274,7 @@ function handleControlMessage(message) {
       item.textContent = name;
       clientListEl.appendChild(item);
     }
+    reconcileRemoteStreams(message.active_stream_ids);
     return;
   }
   if (message.type === "error") {
@@ -328,6 +335,9 @@ function disconnect(closeSocket = true) {
     audioContext.close();
     audioContext = null;
   }
+  captureSendChain = Promise.resolve();
+  pendingCaptureSends = 0;
+  captureSessionId += 1;
   remoteStreams = new Map();
   joinButton.disabled = false;
   leaveButton.disabled = true;
@@ -373,6 +383,13 @@ function parseAudioPacket(arrayBuffer) {
 function updateRfc3550Jitter(packet) {
   const arrivalTimeMs = performance.now();
   const state = getRemoteStreamState(packet.streamId);
+  if (state.lastSequence !== null) {
+    const expected = (state.lastSequence + 1) >>> 0;
+    if (packet.sequence !== expected) {
+      const forwardGap = (packet.sequence - expected) >>> 0;
+      metrics.networkLossPackets += forwardGap > 0 && forwardGap < 0x80000000 ? forwardGap : 1;
+    }
+  }
   state.lastSequence = packet.sequence;
 
   const transitMs = arrivalTimeMs - packet.captureTimeMs;
@@ -395,6 +412,7 @@ function getRemoteStreamState(streamId) {
       jitterMs: 0,
       lastSequence: null,
       nextPlaybackTime: 0,
+      activeNodes: [],
     };
     remoteStreams.set(streamId, state);
   }
@@ -413,10 +431,8 @@ function playPcm16(packet) {
     channel[i] = pcm[i] / 32768;
   }
 
-  const node = audioContext.createBufferSource();
-  node.buffer = audioBuffer;
-  node.connect(audioContext.destination);
   const now = audioContext.currentTime;
+  pruneActiveNodes(state, now);
   if (state.nextPlaybackTime === 0 || now > state.nextPlaybackTime + TALK_BURST_RESET_SECONDS) {
     state.nextPlaybackTime = now + MIN_PLAYBACK_LEAD_SECONDS;
   } else if (now > state.nextPlaybackTime) {
@@ -431,14 +447,37 @@ function playPcm16(packet) {
   if (queuedSeconds > MAX_PLAYBACK_QUEUE_SECONDS) {
     metrics.queueOverflowDroppedPackets += 1;
     metrics.lateDroppedPackets += 1;
+    stopActiveNodes(state);
     state.nextPlaybackTime = now + MIN_PLAYBACK_LEAD_SECONDS;
     return;
   }
 
+  const node = audioContext.createBufferSource();
+  node.buffer = audioBuffer;
+  node.connect(audioContext.destination);
   const startAt = Math.max(now + MIN_PLAYBACK_LEAD_SECONDS, state.nextPlaybackTime);
   node.start(startAt);
   state.nextPlaybackTime = startAt + audioBuffer.duration;
+  state.activeNodes.push({ node, endTime: state.nextPlaybackTime });
+  node.addEventListener("ended", () => {
+    state.activeNodes = state.activeNodes.filter((entry) => entry.node !== node);
+  });
   metrics.playedPackets += 1;
+}
+
+function pruneActiveNodes(state, now) {
+  state.activeNodes = state.activeNodes.filter((entry) => now < entry.endTime);
+}
+
+function stopActiveNodes(state) {
+  for (const entry of state.activeNodes) {
+    try {
+      entry.node.stop();
+    } catch (error) {
+      // The node may already have ended or been stopped by the browser.
+    }
+  }
+  state.activeNodes = [];
 }
 
 function setStatus(text, connected) {
@@ -467,6 +506,7 @@ function sendBrowserMetrics() {
         played_packets: metrics.playedPackets,
         capture_errors: metrics.captureErrors,
         malformed_audio_packets: metrics.malformedAudioPackets,
+        network_loss_packets: metrics.networkLossPackets,
         late_dropped_packets: metrics.lateDroppedPackets,
         queue_overflow_dropped_packets: metrics.queueOverflowDroppedPackets,
         buffer_underrun_events: metrics.bufferUnderrunEvents,
@@ -481,6 +521,10 @@ function sendBrowserMetrics() {
         worklet_message_interval_mean_ms: Number(workletMessageStats.mean.toFixed(3)),
         worklet_message_interval_stddev_ms: Number(statStddev(workletMessageStats).toFixed(3)),
         worklet_message_interval_max_ms: Number(workletMessageStats.max.toFixed(3)),
+        audio_context_sample_rate: metrics.audioContextSampleRate,
+        resampled_frames: metrics.resampledFrames,
+        capture_queue_dropped_frames: metrics.captureQueueDroppedFrames,
+        active_remote_streams: remoteStreams.size,
         last_sent_kbps: Number(metrics.lastSentKbps.toFixed(3)),
         last_rx_kbps: Number(metrics.lastRxKbps.toFixed(3)),
         playback_queue_seconds: Number(playbackQueueSeconds.toFixed(3)),
@@ -496,6 +540,103 @@ function currentPlaybackQueueSeconds() {
   const now = audioContext.currentTime;
   return Math.max(
     0,
-    ...Array.from(remoteStreams.values(), (stream) => Math.max(0, stream.nextPlaybackTime - now)),
+    ...Array.from(remoteStreams.values(), (stream) => {
+      pruneActiveNodes(stream, now);
+      return Math.max(0, stream.nextPlaybackTime - now);
+    }),
   );
+}
+
+function reconcileRemoteStreams(activeStreamIds) {
+  if (!Array.isArray(activeStreamIds)) {
+    return;
+  }
+  const active = new Set(
+    activeStreamIds
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value >= 0),
+  );
+  for (const [remoteStreamId, state] of remoteStreams.entries()) {
+    if (!active.has(remoteStreamId)) {
+      stopActiveNodes(state);
+      remoteStreams.delete(remoteStreamId);
+    }
+  }
+}
+
+function enqueueCapturedAudio(buffer, captureTimeMs, sourceSampleRate) {
+  if (pendingCaptureSends >= MAX_PENDING_CAPTURE_SENDS) {
+    metrics.captureQueueDroppedFrames += 1;
+    return;
+  }
+  pendingCaptureSends += 1;
+  const sessionId = captureSessionId;
+  const task = captureSendChain.then(() => sendCapturedAudio(buffer, captureTimeMs, sourceSampleRate, sessionId));
+  captureSendChain = task.catch(() => {});
+  task
+    .catch(() => {
+      if (sessionId === captureSessionId) {
+        metrics.captureErrors += 1;
+      }
+    })
+    .finally(() => {
+      if (sessionId === captureSessionId) {
+        pendingCaptureSends -= 1;
+      }
+    });
+}
+
+async function sendCapturedAudio(buffer, captureTimeMs, sourceSampleRate, sessionId) {
+  if (sessionId !== captureSessionId || !socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  let payloadBuffer = buffer;
+  const wasResampled = sourceSampleRate !== TARGET_SAMPLE_RATE;
+  if (wasResampled) {
+    payloadBuffer = await resamplePcm16Buffer(buffer, sourceSampleRate);
+  }
+  if (sessionId !== captureSessionId || !socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  if (wasResampled) {
+    metrics.resampledFrames += 1;
+  }
+  const packet = buildAudioPacket(payloadBuffer, captureTimeMs);
+  socket.send(packet);
+  metrics.sentBytes += packet.byteLength;
+  metrics.sentPayloadBytes += payloadBuffer.byteLength;
+  metrics.sentPackets += 1;
+}
+
+async function resamplePcm16Buffer(buffer, sourceSampleRate) {
+  if (!Number.isFinite(sourceSampleRate) || sourceSampleRate <= 0) {
+    throw new Error("Invalid source sample rate.");
+  }
+  if (typeof OfflineAudioContext !== "function" || typeof AudioBuffer !== "function") {
+    throw new Error("Browser audio resampling is unavailable.");
+  }
+  const pcm = new Int16Array(buffer);
+  const targetLength = Math.max(1, Math.round((pcm.length * TARGET_SAMPLE_RATE) / sourceSampleRate));
+  const inputBuffer = new AudioBuffer({
+    length: pcm.length,
+    numberOfChannels: 1,
+    sampleRate: sourceSampleRate,
+  });
+  const inputChannel = inputBuffer.getChannelData(0);
+  for (let i = 0; i < pcm.length; i += 1) {
+    inputChannel[i] = pcm[i] / 32768;
+  }
+  const offlineContext = new OfflineAudioContext(1, targetLength, TARGET_SAMPLE_RATE);
+  const source = offlineContext.createBufferSource();
+  source.buffer = inputBuffer;
+  source.connect(offlineContext.destination);
+  source.start(0);
+  const rendered = await offlineContext.startRendering();
+  const renderedChannel = rendered.getChannelData(0);
+  const output = new Int16Array(renderedChannel.length);
+  for (let i = 0; i < renderedChannel.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, renderedChannel[i]));
+    output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return output.buffer;
 }

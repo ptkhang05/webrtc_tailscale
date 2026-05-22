@@ -4,7 +4,15 @@ import time
 from openpyxl import load_workbook
 
 from web_intercom.metrics import estimate_e_model
-from web_intercom.server import Client, WebIntercomServer, audio_payload_size, build_arg_parser, create_app, load_room_key
+from web_intercom.server import (
+    Client,
+    WebIntercomServer,
+    audio_payload_size,
+    audio_stream_id,
+    build_arg_parser,
+    create_app,
+    load_room_key,
+)
 
 
 def test_parser_defaults():
@@ -45,6 +53,8 @@ def test_audio_packet_header_validation():
     assert audio_payload_size(b"SWI1" + b"\x00" * 16 + b"pcm") == 3
     assert audio_payload_size(b"BAD!" + b"\x00" * 16 + b"pcm") is None
     assert audio_payload_size(b"SWI1") is None
+    packet = b"SWI1" + (123456).to_bytes(4, "big") + b"\x00" * 12 + b"pcm"
+    assert audio_stream_id(packet) == 123456
 
 
 def test_handle_audio_does_not_block_on_slow_recipient():
@@ -75,6 +85,21 @@ def test_handle_audio_does_not_block_on_slow_recipient():
     asyncio.run(run())
 
 
+def test_handle_audio_registers_sender_stream_id():
+    async def run() -> None:
+        relay = WebIntercomServer("secret")
+        sender_ws = object()
+        sender = Client(sender_ws, "client-0001", "alice", "main", time.monotonic())
+        relay.clients[sender_ws] = sender
+        packet = b"SWI1" + (42).to_bytes(4, "big") + b"\x00" * 12 + b"pcm"
+
+        await relay.handle_audio(sender, packet)
+
+        assert sender.stream_ids == {42}
+
+    asyncio.run(run())
+
+
 def test_handle_audio_drops_when_recipient_send_is_pending():
     class HealthyWebSocket:
         async def send_bytes(self, data: bytes) -> None:
@@ -85,6 +110,7 @@ def test_handle_audio_drops_when_recipient_send_is_pending():
         sender_ws = object()
         recipient_ws = HealthyWebSocket()
         sender = Client(sender_ws, "client-0001", "alice", "main", time.monotonic())
+        sender.stream_ids.add(0)
         recipient = Client(recipient_ws, "client-0002", "bob", "main", time.monotonic())
         recipient.send_pending = True
         relay.clients[sender_ws] = sender
@@ -123,8 +149,36 @@ def test_broadcast_presence_skips_broken_client():
         await relay.broadcast_presence("main")
 
         assert healthy_ws.messages == [
-            {"type": "presence", "room": "main", "count": 2, "clients": ["bad", "good"]}
+            {
+                "type": "presence",
+                "room": "main",
+                "count": 2,
+                "clients": ["bad", "good"],
+                "active_stream_ids": [],
+            }
         ]
+
+    asyncio.run(run())
+
+
+def test_broadcast_presence_includes_active_stream_ids():
+    class HealthyWebSocket:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def send_json(self, message: dict) -> None:
+            self.messages.append(message)
+
+    async def run() -> None:
+        relay = WebIntercomServer("secret")
+        websocket = HealthyWebSocket()
+        client = Client(websocket, "client-0001", "alice", "main", time.monotonic())
+        client.stream_ids.update({99, 7})
+        relay.clients[websocket] = client
+
+        await relay.broadcast_presence("main")
+
+        assert websocket.messages[-1]["active_stream_ids"] == [7, 99]
 
     asyncio.run(run())
 

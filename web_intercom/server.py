@@ -38,6 +38,7 @@ class Client:
     joined_at: float
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     send_pending: bool = field(default=False, repr=False)
+    stream_ids: set[int] = field(default_factory=set, repr=False)
 
 
 class WebIntercomServer:
@@ -123,7 +124,15 @@ class WebIntercomServer:
         if payload_size is None:
             self.metrics.inc("dropped_audio_frames")
             return
+        stream_id = audio_stream_id(data)
+        new_stream = stream_id is not None and stream_id not in sender.stream_ids
+        if stream_id is not None:
+            sender.stream_ids.add(stream_id)
         self.metrics.record_audio_in(len(data), payload_size)
+        if new_stream:
+            task = asyncio.create_task(self.broadcast_presence(sender.room))
+            self.relay_tasks.add(task)
+            task.add_done_callback(self.relay_tasks.discard)
         recipients = await self.room_recipient_clients(sender.room, exclude=sender.websocket)
         for recipient in recipients:
             if recipient.send_pending or recipient.send_lock.locked():
@@ -198,7 +207,14 @@ class WebIntercomServer:
         async with self.lock:
             clients = [client for client in self.clients.values() if client.room == room]
         names = sorted(client.name for client in clients)
-        message = {"type": "presence", "room": room, "count": len(names), "clients": names}
+        active_stream_ids = sorted({stream_id for client in clients for stream_id in client.stream_ids})
+        message = {
+            "type": "presence",
+            "room": room,
+            "count": len(names),
+            "clients": names,
+            "active_stream_ids": active_stream_ids,
+        }
         for client in clients:
             try:
                 await client.websocket.send_json(message)
@@ -240,6 +256,12 @@ def audio_payload_size(data: bytes) -> int | None:
     if data[: len(AUDIO_PACKET_MAGIC)] != AUDIO_PACKET_MAGIC:
         return None
     return len(data) - AUDIO_PACKET_HEADER_BYTES
+
+
+def audio_stream_id(data: bytes) -> int | None:
+    if audio_payload_size(data) is None:
+        return None
+    return int.from_bytes(data[4:8], byteorder="big", signed=False)
 
 
 def load_room_key(value: str | None) -> str:

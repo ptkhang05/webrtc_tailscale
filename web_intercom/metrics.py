@@ -57,6 +57,7 @@ SERVER_GUIDE = {
     "browser_played_packets": ("Browser played packets", "packets", "Total received packets scheduled for speaker playback."),
     "browser_capture_errors": ("Browser capture errors", "events", "Microphone capture errors reported by browsers."),
     "browser_malformed_audio_packets": ("Malformed browser audio packets", "packets", "Audio packets rejected by browsers because the application header was invalid."),
+    "browser_network_loss_packets": ("Network sequence gaps", "packets", "Estimated missing audio packets from stream sequence discontinuities."),
     "browser_late_dropped_packets": ("Late dropped packets", "packets", "Packets browsers actually dropped because the per-stream playback queue budget was exceeded."),
     "browser_queue_overflow_dropped_packets": ("Queue overflow drops", "packets", "Packets dropped to prevent WebSocket/TCP accumulated delay from growing the playback queue."),
     "browser_buffer_underrun_events": ("Buffer underrun events", "events", "Times browser playback found the playout schedule had already run dry."),
@@ -70,6 +71,10 @@ SERVER_GUIDE = {
     "browser_avg_estimated_mos": ("Average estimated MOS", "MOS", "Average objective MOS estimate from the simplified ITU-T G.107 E-model."),
     "browser_min_estimated_mos": ("Minimum estimated MOS", "MOS", "Worst client MOS estimate at this sample."),
     "browser_max_callback_stddev_ms": ("Max callback stddev", "ms", "Largest browser AudioWorklet callback interval standard deviation."),
+    "browser_resampled_frames": ("Browser resampled frames", "frames", "Captured frames resampled to 16 kHz before network transmission."),
+    "browser_capture_queue_dropped_frames": ("Capture queue drops", "frames", "Captured frames dropped because the client-side send/resampling queue was full."),
+    "browser_max_audio_context_sample_rate": ("Max audio context sample rate", "Hz", "Largest actual browser AudioContext sample rate reported by connected clients."),
+    "browser_max_active_remote_streams": ("Max active remote streams", "streams", "Largest remote stream count reported by connected clients."),
 }
 
 
@@ -90,6 +95,7 @@ CLIENT_GUIDE = {
     "played_packets": ("Played packets", "packets", "Received packets scheduled for speaker playback."),
     "capture_errors": ("Capture errors", "events", "Browser-side capture/send errors."),
     "malformed_audio_packets": ("Malformed audio packets", "packets", "Received binary messages rejected by the browser because their application header was invalid."),
+    "network_loss_packets": ("Network sequence gaps", "packets", "Estimated missing audio packets from sequence discontinuities; this is not counted as a late drop unless playout discards a packet."),
     "late_dropped_packets": ("Late dropped packets", "packets", "Received packets actually dropped because the per-stream playback queue budget was exceeded."),
     "queue_overflow_dropped_packets": ("Queue overflow drops", "packets", "Packets dropped to cap accumulated playback queue delay."),
     "buffer_underrun_events": ("Buffer underrun events", "events", "Times playback discovered that the scheduled playout buffer had run dry."),
@@ -104,6 +110,10 @@ CLIENT_GUIDE = {
     "worklet_message_interval_mean_ms": ("Worklet message mean", "ms", "Mean interval between AudioWorklet messages received by the main thread."),
     "worklet_message_interval_stddev_ms": ("Worklet message stddev", "ms", "Standard deviation of AudioWorklet-to-main-thread message intervals."),
     "worklet_message_interval_max_ms": ("Worklet message max", "ms", "Maximum observed AudioWorklet-to-main-thread message interval."),
+    "audio_context_sample_rate": ("Audio context sample rate", "Hz", "Actual browser AudioContext sample rate; may differ from the requested 16 kHz."),
+    "resampled_frames": ("Resampled frames", "frames", "Captured frames resampled to 16 kHz before transmission."),
+    "capture_queue_dropped_frames": ("Capture queue drops", "frames", "Captured frames dropped because the send/resampling queue was full."),
+    "active_remote_streams": ("Active remote streams", "streams", "Remote stream states currently tracked by the browser."),
     "last_sent_kbps": ("Latest send bitrate", "kbps", "Browser-calculated send bitrate in the latest UI interval."),
     "last_rx_kbps": ("Latest receive bitrate", "kbps", "Browser-calculated receive bitrate in the latest UI interval."),
     "playback_queue_seconds": ("Playback queue", "seconds", "Estimated browser playback buffer delay."),
@@ -255,6 +265,7 @@ class WebIntercomMetrics:
             "browser_played_packets": 0,
             "browser_capture_errors": 0,
             "browser_malformed_audio_packets": 0,
+            "browser_network_loss_packets": 0,
             "browser_late_dropped_packets": 0,
             "browser_queue_overflow_dropped_packets": 0,
             "browser_buffer_underrun_events": 0,
@@ -268,6 +279,10 @@ class WebIntercomMetrics:
             "browser_avg_estimated_mos": 0.0,
             "browser_min_estimated_mos": 0.0,
             "browser_max_callback_stddev_ms": 0.0,
+            "browser_resampled_frames": 0,
+            "browser_capture_queue_dropped_frames": 0,
+            "browser_max_audio_context_sample_rate": 0.0,
+            "browser_max_active_remote_streams": 0,
         }
         mapping = {
             "captured_frames": "browser_captured_frames",
@@ -280,9 +295,12 @@ class WebIntercomMetrics:
             "played_packets": "browser_played_packets",
             "capture_errors": "browser_capture_errors",
             "malformed_audio_packets": "browser_malformed_audio_packets",
+            "network_loss_packets": "browser_network_loss_packets",
             "late_dropped_packets": "browser_late_dropped_packets",
             "queue_overflow_dropped_packets": "browser_queue_overflow_dropped_packets",
             "buffer_underrun_events": "browser_buffer_underrun_events",
+            "resampled_frames": "browser_resampled_frames",
+            "capture_queue_dropped_frames": "browser_capture_queue_dropped_frames",
         }
         rtt_values: list[float] = []
         owd_values: list[float] = []
@@ -307,6 +325,14 @@ class WebIntercomMetrics:
             _append_positive(latency_values, state.latest.get("estimated_playout_latency_ms"))
             _append_positive(mos_values, state.latest.get("estimated_mos"))
             _append_positive(callback_stddev_values, state.latest.get("callback_interval_stddev_ms"))
+            totals["browser_max_audio_context_sample_rate"] = max(
+                _as_float(totals["browser_max_audio_context_sample_rate"]),
+                _as_float(state.latest.get("audio_context_sample_rate")),
+            )
+            totals["browser_max_active_remote_streams"] = max(
+                _as_int(totals["browser_max_active_remote_streams"]),
+                _as_int(state.latest.get("active_remote_streams")),
+            )
         totals["browser_avg_rtt_ms"] = _mean(rtt_values)
         totals["browser_max_rtt_ms"] = _max_values(rtt_values)
         totals["browser_avg_estimated_owd_ms"] = _mean(owd_values)
@@ -498,7 +524,10 @@ def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clie
         ("Estimated OWD", _as_float(latest.get("browser_avg_estimated_owd_ms")), "ms", "Latest average RTT/2 one-way delay estimate from browsers."),
         ("Max RFC3550 jitter", _as_float(latest.get("browser_max_jitter_ms")), "ms", "Latest worst browser inter-arrival jitter estimate."),
         ("Average estimated MOS", _as_float(latest.get("browser_avg_estimated_mos")), "MOS", "Latest objective QoE estimate from browser metrics."),
+        ("Network sequence gaps", _as_int(latest.get("browser_network_loss_packets")), "packets", "Client-estimated missing packets from stream sequence gaps."),
         ("Late dropped packets", _as_int(latest.get("browser_late_dropped_packets")), "packets", "Browser packets actually dropped because per-stream queue pressure exceeded the configured budget."),
+        ("Browser resampled frames", _as_int(latest.get("browser_resampled_frames")), "frames", "Captured frames resampled to 16 kHz before transmission."),
+        ("Audio context sample rate", _as_float(latest.get("browser_max_audio_context_sample_rate")), "Hz", "Largest actual browser AudioContext sample rate observed among active clients."),
         ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Browser playout starvation events."),
         ("Dropped audio frames", _as_int(latest.get("dropped_audio_frames")), "frames", "Frames rejected by server validation."),
         ("Browser capture errors", _as_int(latest.get("browser_capture_errors")), "events", "Capture errors reported by browsers."),
@@ -522,6 +551,7 @@ def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], 
     callback_stddev_values = _client_sample_values(clients, "callback_interval_stddev_ms")
     late_drops = _as_float(latest.get("browser_late_dropped_packets"))
     received = _as_float(latest.get("browser_received_packets"))
+    network_gaps = _as_float(latest.get("browser_network_loss_packets"))
 
     qos_rows = [
         ("Estimated OWD mean", _mean(owd_values), "ms", "RTT/2 approximation for the browser-to-server path; useful without synchronized LAN clocks."),
@@ -529,6 +559,7 @@ def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], 
         ("RFC3550 jitter mean", _mean(jitter_values), "ms", "Mean inter-arrival jitter calculated from packet timestamp spacing."),
         ("RFC3550 jitter p95", _percentile(jitter_values, 95), "ms", "95th percentile jitter; this is more useful for paper plots than total byte counters."),
         ("RFC3550 jitter max", _max_values(jitter_values), "ms", "Worst observed browser jitter estimate."),
+        ("Network sequence gaps", network_gaps, "packets", "Estimated missing packets from stream sequence discontinuities; separate from actual playout drops."),
         ("Late drop rate", percentage(late_drops, received + late_drops), "%", "Packets actually dropped because TCP/WebSocket delivery caused a per-stream queue budget overflow."),
         ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Playback starvation events reported by browsers."),
         ("Buffer underrun duration", _as_float(latest.get("browser_buffer_underrun_seconds")), "seconds", "Cumulative audible gap duration from browser playout underruns."),
@@ -616,6 +647,7 @@ def _build_assessment(sheet: object, latest: MetricRow, clients: list[ClientMetr
     received_packets = _as_int(latest.get("browser_received_packets"))
     auth_failures = _as_int(latest.get("auth_failures"))
     capture_errors = _as_int(latest.get("browser_capture_errors"))
+    network_gaps = _as_int(latest.get("browser_network_loss_packets"))
     late_drops = _as_int(latest.get("browser_late_dropped_packets"))
     underruns = _as_int(latest.get("browser_buffer_underrun_events"))
     avg_mos = _as_float(latest.get("browser_avg_estimated_mos"))
@@ -629,6 +661,7 @@ def _build_assessment(sheet: object, latest: MetricRow, clients: list[ClientMetr
         _assessment("Audio playback", received_packets > 0, f"{received_packets} browser-reported received packet(s)", "If zero, connect another client and check browser audio output."),
         _assessment("Room-key security", auth_failures == 0, f"{auth_failures} failed authentication attempt(s)", "If non-zero, verify users entered the correct room key."),
         _assessment("Capture health", capture_errors == 0, f"{capture_errors} capture error(s)", "If non-zero, check browser microphone permissions and device availability."),
+        _assessment("Network sequence continuity", network_gaps == 0, f"{network_gaps} sequence gap packet(s)", "If non-zero, inspect relay drops, Wi-Fi instability, or browser-side receive gaps."),
         _assessment("Late packet behavior", late_drops == 0, f"{late_drops} browser late-drop packet(s)", "If non-zero, inspect Wi-Fi congestion or compare against a WebRTC/UDP media path."),
         _assessment("Playout continuity", underruns == 0, f"{underruns} browser buffer underrun event(s)", "If non-zero, use the QoS and Jitter CDF sheets to quantify TCP/WebSocket delay instability."),
         _assessment("Estimated QoE", avg_mos >= 3.6 or avg_mos == 0, f"Average estimated MOS={avg_mos:.3f}", "For IEEE-style reporting, target MOS >= 3.6 and report the model assumptions."),
@@ -660,6 +693,7 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState], table
         "played_packets",
         "capture_errors",
         "malformed_audio_packets",
+        "network_loss_packets",
         "late_dropped_packets",
         "queue_overflow_dropped_packets",
         "buffer_underrun_events",
@@ -674,6 +708,10 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState], table
         "r_factor",
         "estimated_mos",
         "mos_quality",
+        "audio_context_sample_rate",
+        "resampled_frames",
+        "capture_queue_dropped_frames",
+        "active_remote_streams",
         "callback_interval_stddev_ms",
         "worklet_message_interval_stddev_ms",
         "last_sent_kbps",
@@ -722,6 +760,7 @@ def _build_samples(sheet: object, rows: list[MetricRow], table_cls: object, styl
         "browser_played_packets",
         "browser_capture_errors",
         "browser_malformed_audio_packets",
+        "browser_network_loss_packets",
         "browser_late_dropped_packets",
         "browser_queue_overflow_dropped_packets",
         "browser_buffer_underrun_events",
@@ -735,6 +774,10 @@ def _build_samples(sheet: object, rows: list[MetricRow], table_cls: object, styl
         "browser_avg_estimated_mos",
         "browser_min_estimated_mos",
         "browser_max_callback_stddev_ms",
+        "browser_resampled_frames",
+        "browser_capture_queue_dropped_frames",
+        "browser_max_audio_context_sample_rate",
+        "browser_max_active_remote_streams",
     ]
     _write_table(sheet, fields, rows, table_cls, style_cls, font_cls, fill_cls)
 
@@ -794,6 +837,7 @@ def _client_summary_row(client: ClientMetricState) -> MetricRow:
         "played_packets": _as_int(latest.get("played_packets")),
         "capture_errors": _as_int(latest.get("capture_errors")),
         "malformed_audio_packets": _as_int(latest.get("malformed_audio_packets")),
+        "network_loss_packets": _as_int(latest.get("network_loss_packets")),
         "late_dropped_packets": _as_int(latest.get("late_dropped_packets")),
         "queue_overflow_dropped_packets": _as_int(latest.get("queue_overflow_dropped_packets")),
         "buffer_underrun_events": _as_int(latest.get("buffer_underrun_events")),
@@ -808,6 +852,10 @@ def _client_summary_row(client: ClientMetricState) -> MetricRow:
         "r_factor": _as_float(latest.get("r_factor")),
         "estimated_mos": _as_float(latest.get("estimated_mos")),
         "mos_quality": str(latest.get("mos_quality") or ""),
+        "audio_context_sample_rate": _as_float(latest.get("audio_context_sample_rate")),
+        "resampled_frames": _as_int(latest.get("resampled_frames")),
+        "capture_queue_dropped_frames": _as_int(latest.get("capture_queue_dropped_frames")),
+        "active_remote_streams": _as_int(latest.get("active_remote_streams")),
         "callback_interval_stddev_ms": _as_float(latest.get("callback_interval_stddev_ms")),
         "worklet_message_interval_stddev_ms": _as_float(latest.get("worklet_message_interval_stddev_ms")),
         "last_sent_kbps": _as_float(latest.get("last_sent_kbps")),
