@@ -469,22 +469,18 @@ def write_metrics_workbook(
     qos_summary = workbook.create_sheet("QoS Summary")
     qoe_summary = workbook.create_sheet("QoE Summary")
     jitter_cdf = workbook.create_sheet("Jitter CDF")
-    assessment = workbook.create_sheet("Assessment")
     client_summary = workbook.create_sheet("Client Summary")
-    samples = workbook.create_sheet("Samples")
-    client_samples = workbook.create_sheet("Client Samples")
-    guide = workbook.create_sheet("Metric Guide")
+    time_series = workbook.create_sheet("Time Series")
+    paper_metrics = workbook.create_sheet("Paper Metrics")
 
     latest = server_samples[-1] if server_samples else {}
     _build_summary(summary, latest, server_samples, client_states, Font, PatternFill)
     _build_qos_summary(qos_summary, latest, server_samples, client_states, Font, PatternFill)
     _build_qoe_summary(qoe_summary, latest, client_states, Font, PatternFill)
     _build_jitter_cdf(jitter_cdf, client_states, LineChart, Reference, Font, PatternFill)
-    _build_assessment(assessment, latest, client_states, Font, PatternFill)
     _build_client_summary(client_summary, client_states, Table, TableStyleInfo, Font, PatternFill)
-    _build_samples(samples, server_samples, Table, TableStyleInfo, Font, PatternFill)
-    _build_client_samples(client_samples, client_states, Table, TableStyleInfo, Font, PatternFill)
-    _build_guide(guide, Font, PatternFill)
+    _build_time_series(time_series, server_samples, Table, TableStyleInfo, Font, PatternFill)
+    _build_paper_metrics(paper_metrics, Font, PatternFill)
     _add_qos_chart(qos_summary, server_samples, LineChart, Reference)
 
     for sheet in workbook.worksheets:
@@ -503,33 +499,33 @@ def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clie
     _write_row(sheet, 4, headers)
     _style_header(sheet, "A4:D4", font_cls, fill_cls)
 
+    received = _as_float(latest.get("browser_received_packets"))
+    relayed = _as_float(latest.get("relayed_packets"))
+    jitter_values = _client_sample_values(clients, "rfc3550_jitter_ms")
+    latency_values = _client_sample_values(clients, "estimated_playout_latency_ms")
+    owd_values = _client_sample_values(clients, "estimated_owd_ms")
+    callback_stddev_values = _client_sample_values(clients, "callback_interval_stddev_ms")
+
     summary_rows = [
         ("Measurement duration", _as_float(latest.get("uptime_seconds")), "seconds", "How long this measurement run has been active."),
         ("Sample count", len(rows), "samples", "Number of server-side measurement intervals saved."),
         ("Active clients", _as_int(latest.get("active_clients")), "clients", "Browsers connected at the latest sample."),
-        ("Active rooms", _as_int(latest.get("active_rooms")), "rooms", "Rooms currently in use."),
         ("Total clients seen", len(clients), "clients", "Unique browser connections during the run."),
-        ("Total joins", _as_int(latest.get("join_events")), "events", "Successful browser connections."),
-        ("Authentication failures", _as_int(latest.get("auth_failures")), "events", "Rejected attempts due to wrong room key."),
-        ("Auth rate-limit rejections", _as_int(latest.get("auth_rate_limit_rejections")), "events", "Rejected attempts after an IP exceeded the failed room-key attempt limit."),
-        ("Connection limit rejections", _as_int(latest.get("connection_limit_rejections")), "events", "Rejected WebSocket attempts due to server or per-IP connection limits."),
-        ("Average payload receive bitrate", _as_float(latest.get("avg_rx_payload_kbps")), "kbps", "Average inbound PCM16 payload rate since start."),
-        ("Average payload relay bitrate", _as_float(latest.get("avg_relayed_payload_kbps")), "kbps", "Average forwarded PCM16 payload rate since start."),
-        ("Peak interval payload receive bitrate", _max(rows, "interval_rx_payload_kbps"), "kbps", "Highest inbound PCM16 payload bitrate in any interval."),
-        ("Peak interval payload relay bitrate", _max(rows, "interval_relayed_payload_kbps"), "kbps", "Highest forwarded PCM16 payload bitrate in any interval."),
-        ("Audio packets received", _as_int(latest.get("rx_audio_packets")), "packets", "Binary audio packets accepted by the server."),
-        ("Audio packets relayed", _as_int(latest.get("relayed_packets")), "packets", "Audio packets forwarded to room recipients."),
-        ("Relay send drops", _as_int(latest.get("relay_send_drops")), "packets", "Outbound packets dropped to prevent a slow recipient from blocking the relay loop."),
-        ("Estimated OWD", _as_float(latest.get("browser_avg_estimated_owd_ms")), "ms", "Latest average RTT/2 one-way delay estimate from browsers."),
-        ("Estimated playout latency", _as_float(latest.get("browser_avg_playout_latency_ms")), "ms", "Average client playout latency estimate including RTT/2 and queue delay."),
-        ("Max RFC3550 jitter", _as_float(latest.get("browser_max_jitter_ms")), "ms", "Latest worst browser inter-arrival jitter estimate."),
-        ("Average estimated MOS", _as_float(latest.get("browser_avg_estimated_mos")), "MOS", "Latest objective QoE estimate from browser metrics."),
-        ("Minimum estimated MOS", _as_float(latest.get("browser_min_estimated_mos")), "MOS", "Worst current objective QoE estimate among active browsers."),
-        ("Network sequence gaps", _as_int(latest.get("browser_network_loss_packets")), "packets", "Client-estimated missing packets from stream sequence gaps."),
-        ("Late dropped packets", _as_int(latest.get("browser_late_dropped_packets")), "packets", "Browser packets actually dropped because per-stream queue pressure exceeded the configured budget."),
-        ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Browser playout starvation events."),
-        ("Dropped audio frames", _as_int(latest.get("dropped_audio_frames")), "frames", "Frames rejected by server validation."),
-        ("Browser capture errors", _as_int(latest.get("browser_capture_errors")), "events", "Capture errors reported by browsers."),
+        ("Mean estimated OWD", _mean(owd_values) or _as_float(latest.get("browser_avg_estimated_owd_ms")), "ms", "RTT/2 LAN delay estimate used when client clocks are not synchronized."),
+        ("P95 playout latency", _percentile(latency_values, 95), "ms", "High-percentile delay estimate for conversational QoE analysis."),
+        ("P95 RFC3550 jitter", _percentile(jitter_values, 95), "ms", "High-percentile inter-arrival jitter for paper plots."),
+        ("Network sequence gap rate", percentage(latest.get("browser_network_loss_packets"), received), "%", "Estimated sequence gaps divided by browser-received packets."),
+        ("Late drop rate", percentage(latest.get("browser_late_dropped_packets"), received), "%", "Packets actually discarded because the playout queue budget was exceeded."),
+        ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Browser playout starvation events during the run."),
+        ("Buffer underrun duration", _as_float(latest.get("browser_buffer_underrun_seconds")), "seconds", "Total estimated audible gap duration reported by browsers."),
+        ("Average estimated MOS", _as_float(latest.get("browser_avg_estimated_mos")), "MOS", "Objective QoE estimate from the simplified E-model."),
+        ("Minimum estimated MOS", _as_float(latest.get("browser_min_estimated_mos")), "MOS", "Worst current client MOS estimate."),
+        ("Average payload relay bitrate", _as_float(latest.get("avg_relayed_payload_kbps")), "kbps", "Average forwarded PCM16 payload rate; useful for bandwidth discussion."),
+        ("Peak payload relay bitrate", _max(rows, "interval_relayed_payload_kbps"), "kbps", "Highest interval forwarding rate observed by the server."),
+        ("Relay send drop rate", percentage(latest.get("relay_send_drops"), relayed), "%", "Server-side drops caused by bounded relay queues or send timeouts."),
+        ("AudioWorklet callback stddev max", _max_values(callback_stddev_values), "ms", "Worst browser capture callback timing instability."),
+        ("Resampled frames", _as_int(latest.get("browser_resampled_frames")), "frames", "Captured frames converted to 16 kHz when hardware sample rate differed."),
+        ("Capture queue drops", _as_int(latest.get("browser_capture_queue_dropped_frames")), "frames", "Captured frames discarded before send due to client-side queue pressure."),
     ]
     for index, row in enumerate(summary_rows, start=5):
         _write_row(sheet, index, row)
@@ -550,6 +546,7 @@ def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], 
     late_drops = _as_float(latest.get("browser_late_dropped_packets"))
     received = _as_float(latest.get("browser_received_packets"))
     network_gaps = _as_float(latest.get("browser_network_loss_packets"))
+    relayed = _as_float(latest.get("relayed_packets"))
 
     qos_rows = [
         ("Estimated OWD mean", _mean(owd_values), "ms", "RTT/2 approximation for the browser-to-server path; useful without synchronized LAN clocks."),
@@ -558,12 +555,14 @@ def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], 
         ("RFC3550 jitter p95", _percentile(jitter_values, 95), "ms", "95th percentile jitter; this is more useful for paper plots than total byte counters."),
         ("RFC3550 jitter max", _max_values(jitter_values), "ms", "Worst observed browser jitter estimate."),
         ("Network sequence gaps", network_gaps, "packets", "Estimated missing packets from stream sequence discontinuities; separate from actual playout drops."),
+        ("Network sequence gap rate", percentage(network_gaps, received), "%", "Sequence gaps divided by browser-received packets; useful when comparing Wi-Fi conditions."),
         ("Late drop rate", percentage(late_drops, received), "%", "Packets actually dropped because TCP/WebSocket delivery caused a per-stream queue budget overflow."),
         ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Playback starvation events reported by browsers."),
         ("Buffer underrun duration", _as_float(latest.get("browser_buffer_underrun_seconds")), "seconds", "Cumulative audible gap duration from browser playout underruns."),
         ("Estimated playout latency p95", _percentile(latency_values, 95), "ms", "Approximate client playout path delay including RTT/2 and playback queue."),
         ("AudioWorklet callback stddev max", _max_values(callback_stddev_values), "ms", "Worst callback interval instability reported by browsers."),
-        ("PCM payload efficiency", _payload_efficiency(latest), "%", "Payload bytes divided by network bytes; lower values indicate more header/control overhead."),
+        ("Relay send drop rate", percentage(latest.get("relay_send_drops"), relayed), "%", "Server relay drops divided by relayed packets; captures bounded-queue pressure."),
+        ("Peak relay payload bitrate", _max(rows, "interval_relayed_payload_kbps"), "kbps", "Peak forwarded PCM16 payload rate during a measurement interval."),
     ]
     for index, row in enumerate(qos_rows, start=5):
         _write_row(sheet, index, row)
@@ -632,45 +631,6 @@ def _build_jitter_cdf(sheet: object, clients: list[ClientMetricState], chart_cls
     sheet.add_chart(chart, "D5")
 
 
-def _build_assessment(sheet: object, latest: MetricRow, clients: list[ClientMetricState], font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Assessment", font_cls, fill_cls)
-    headers = ["Check", "Status", "Evidence", "Recommendation"]
-    _write_row(sheet, 4, headers)
-    _style_header(sheet, "A4:D4", font_cls, fill_cls)
-
-    active_clients = _as_int(latest.get("active_clients"))
-    relayed_packets = _as_int(latest.get("relayed_packets"))
-    sent_packets = _as_int(latest.get("browser_sent_packets"))
-    received_packets = _as_int(latest.get("browser_received_packets"))
-    auth_failures = _as_int(latest.get("auth_failures"))
-    capture_errors = _as_int(latest.get("browser_capture_errors"))
-    network_gaps = _as_int(latest.get("browser_network_loss_packets"))
-    late_drops = _as_int(latest.get("browser_late_dropped_packets"))
-    underruns = _as_int(latest.get("browser_buffer_underrun_events"))
-    avg_mos = _as_float(latest.get("browser_avg_estimated_mos"))
-    jitter = _as_float(latest.get("browser_max_jitter_ms"))
-    client_names = ", ".join(sorted({client.name for client in clients if client.active})) or "none"
-
-    rows = [
-        _assessment("Client presence", active_clients >= 2, f"{active_clients} active client(s): {client_names}", "Run at least two browser clients in the same room for a real intercom test."),
-        _assessment("Audio upload", sent_packets > 0, f"{sent_packets} browser-reported sent packet(s)", "If zero, verify microphone permission and that clients clicked Connect."),
-        _assessment("Server relay", relayed_packets > 0, f"{relayed_packets} relayed packet(s)", "If zero while clients are online, confirm they are in the same room and speaking."),
-        _assessment("Audio playback", received_packets > 0, f"{received_packets} browser-reported received packet(s)", "If zero, connect another client and check browser audio output."),
-        _assessment("Room-key security", auth_failures == 0, f"{auth_failures} failed authentication attempt(s)", "If non-zero, verify users entered the correct room key."),
-        _assessment("Capture health", capture_errors == 0, f"{capture_errors} capture error(s)", "If non-zero, check browser microphone permissions and device availability."),
-        _assessment("Network sequence continuity", network_gaps == 0, f"{network_gaps} sequence gap packet(s)", "If non-zero, inspect relay drops, Wi-Fi instability, or browser-side receive gaps."),
-        _assessment("Late packet behavior", late_drops == 0, f"{late_drops} browser late-drop packet(s)", "If non-zero, inspect Wi-Fi congestion or compare against a WebRTC/UDP media path."),
-        _assessment("Playout continuity", underruns == 0, f"{underruns} browser buffer underrun event(s)", "If non-zero, use the QoS and Jitter CDF sheets to quantify TCP/WebSocket delay instability."),
-        _assessment("Estimated QoE", avg_mos >= 3.6 or avg_mos == 0, f"Average estimated MOS={avg_mos:.3f}", "For IEEE-style reporting, target MOS >= 3.6 and report the model assumptions."),
-        _assessment("Jitter stability", jitter <= 30 or jitter == 0, f"Max RFC3550 jitter={jitter:.3f} ms", "If high, add controlled network-emulation scenarios and compare protocol variants."),
-    ]
-    for index, row in enumerate(rows, start=5):
-        _write_row(sheet, index, row)
-        status_cell = sheet.cell(index, 2)
-        status_cell.font = font_cls(bold=True)
-        status_cell.fill = fill_cls("solid", fgColor="C6EFCE" if row[1] == "OK" else "FFC7CE")
-
-
 def _build_client_summary(sheet: object, clients: list[ClientMetricState], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
     _title(sheet, "Client Summary", font_cls, fill_cls)
     fields = [
@@ -679,15 +639,13 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState], table
         "room",
         "status",
         "session_duration_seconds",
-        "captured_frames",
         "sent_packets",
         "received_packets",
         "played_packets",
         "capture_errors",
-        "malformed_audio_packets",
         "network_loss_packets",
         "late_dropped_packets",
-        "queue_overflow_dropped_packets",
+        "late_drop_rate_percent",
         "buffer_underrun_events",
         "buffer_underrun_seconds",
         "max_buffer_underrun_ms",
@@ -695,48 +653,31 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState], table
         "estimated_owd_ms",
         "rfc3550_jitter_ms",
         "estimated_playout_latency_ms",
-        "late_drop_rate_percent",
         "buffer_underrun_rate_per_min",
         "r_factor",
         "estimated_mos",
         "mos_quality",
+        "callback_interval_stddev_ms",
         "audio_context_sample_rate",
         "resampled_frames",
         "capture_queue_dropped_frames",
         "active_remote_streams",
-        "callback_interval_stddev_ms",
-        "playback_queue_seconds",
     ]
     _write_table(sheet, fields, [_client_summary_row(client) for client in clients], table_cls, style_cls, font_cls, fill_cls)
 
 
-def _build_samples(sheet: object, rows: list[MetricRow], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Server Samples", font_cls, fill_cls)
+def _build_time_series(sheet: object, rows: list[MetricRow], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
+    _title(sheet, "Paper-Ready Time Series", font_cls, fill_cls)
     fields = [
         "timestamp",
         "uptime_seconds",
         "active_clients",
         "active_rooms",
-        "join_events",
-        "leave_events",
-        "auth_failures",
-        "auth_rate_limit_rejections",
-        "connection_limit_rejections",
-        "invalid_messages",
-        "rx_audio_packets",
-        "relayed_packets",
-        "relay_send_drops",
-        "dropped_audio_frames",
-        "avg_rx_payload_kbps",
-        "avg_relayed_payload_kbps",
         "interval_rx_payload_kbps",
         "interval_relayed_payload_kbps",
         "interval_rx_pps",
         "interval_relayed_pps",
-        "browser_sent_packets",
         "browser_received_packets",
-        "browser_played_packets",
-        "browser_capture_errors",
         "browser_network_loss_packets",
         "browser_late_dropped_packets",
         "browser_buffer_underrun_events",
@@ -748,33 +689,71 @@ def _build_samples(sheet: object, rows: list[MetricRow], table_cls: object, styl
         "browser_avg_estimated_mos",
         "browser_min_estimated_mos",
         "browser_max_callback_stddev_ms",
+        "relay_send_drops",
+        "dropped_audio_frames",
         "browser_resampled_frames",
-        "browser_max_audio_context_sample_rate",
-        "browser_max_active_remote_streams",
+        "browser_capture_queue_dropped_frames",
     ]
     _write_table(sheet, fields, rows, table_cls, style_cls, font_cls, fill_cls)
 
 
-def _build_client_samples(sheet: object, clients: list[ClientMetricState], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Browser Metric Samples", font_cls, fill_cls)
-    fields = ["timestamp", "client_id", "name", "room", *CLIENT_GUIDE.keys()]
-    fields = _dedupe(fields)
-    rows: list[MetricRow] = []
-    for client in clients:
-        rows.extend(client.samples)
-    _write_table(sheet, fields, rows, table_cls, style_cls, font_cls, fill_cls)
-
-
-def _build_guide(sheet: object, font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Metric Guide", font_cls, fill_cls)
-    fields = ["Source", "Column", "Label", "Unit", "Meaning"]
+def _build_paper_metrics(sheet: object, font_cls: object, fill_cls: object) -> None:
+    _title(sheet, "Paper Metric Selection", font_cls, fill_cls)
+    fields = ["Metric group", "Exported metric", "Why it matters for the paper", "Use in Experimental Results"]
     _write_row(sheet, 4, fields)
-    _style_header(sheet, "A4:E4", font_cls, fill_cls)
-    index = 5
-    for source, guide in [("Server", SERVER_GUIDE), ("Browser", CLIENT_GUIDE)]:
-        for field, (label, unit, meaning) in guide.items():
-            _write_row(sheet, index, [source, field, label, unit, meaning])
-            index += 1
+    _style_header(sheet, "A4:D4", font_cls, fill_cls)
+    rows = [
+        (
+            "Delay",
+            "Mean/P95 estimated OWD and P95 playout latency",
+            "Voice intercom quality is delay-sensitive; high percentiles expose TCP/WSS delay spikes better than averages alone.",
+            "Report per network condition and compare against the conversational-delay target.",
+        ),
+        (
+            "Jitter",
+            "RFC3550 jitter mean/P95/max and Jitter CDF",
+            "Inter-arrival jitter is a standard real-time media QoS indicator and directly supports distribution plots.",
+            "Use the CDF sheet for the main paper figure.",
+        ),
+        (
+            "Late delivery",
+            "Late drop rate and network sequence gap rate",
+            "WSS/TCP can hide transport loss but still creates packets that miss the playout budget.",
+            "Report as impairment percentages under LAN, Wi-Fi, and congested Wi-Fi.",
+        ),
+        (
+            "Playout continuity",
+            "Buffer underrun events and duration",
+            "Underruns are audible continuity failures and make the latency/jitter results interpretable.",
+            "Use events/minute or total duration as supporting QoE evidence.",
+        ),
+        (
+            "QoE",
+            "R-factor, estimated MOS, and MOS quality class",
+            "Maps delay and late-drop impairment to an objective voice-quality estimate.",
+            "Summarize in the QoE table; keep the simplified E-model assumption explicit.",
+        ),
+        (
+            "Bandwidth",
+            "Average and peak relay payload bitrate",
+            "Quantifies the cost of uncompressed PCM16 relay traffic without cluttering the workbook with raw byte counters.",
+            "Use when discussing scalability as client count increases.",
+        ),
+        (
+            "Relay stability",
+            "Relay send drop rate",
+            "Shows whether bounded per-recipient queues are dropping packets due to slow receivers.",
+            "Use to explain server-side behavior in congested cases.",
+        ),
+        (
+            "Browser runtime",
+            "AudioWorklet callback stddev, resampled frames, capture queue drops",
+            "Confirms capture timing stability and whether hardware sample-rate mismatch affected the test.",
+            "Use as validity checks, not as the headline result.",
+        ),
+    ]
+    for row_index, row in enumerate(rows, start=5):
+        _write_row(sheet, row_index, row)
 
 
 def _write_table(sheet: object, fields: list[str], rows: list[Mapping[str, object]], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
@@ -876,12 +855,12 @@ def _add_qos_chart(qos_summary: object, rows: list[MetricRow], chart_cls: object
 
 def _format_line_chart(chart: object, title: str, y_title: str, x_title: str) -> None:
     chart.title = title
-    chart.style = 13
-    chart.height = 7.0
-    chart.width = 12.5
+    chart.style = 2
+    chart.height = 6.0
+    chart.width = 11.5
     chart.y_axis.title = y_title
     chart.x_axis.title = x_title
-    chart.legend.position = "b"
+    chart.legend.position = "r"
     chart.y_axis.numFmt = "0.0"
     chart.x_axis.majorGridlines = None
     chart.y_axis.majorGridlines = None
@@ -898,7 +877,7 @@ def _title(sheet: object, title: str, font_cls: object, fill_cls: object) -> Non
 
     sheet["A1"] = title
     sheet["A2"] = "Processed measurement workbook for browser-based secure LAN intercom."
-    sheet["A1"].font = font_cls(size=16, bold=True, color="FFFFFF")
+    sheet["A1"].font = font_cls(size=15, bold=True, color="FFFFFF")
     sheet["A1"].fill = fill_cls("solid", fgColor="1F4E78")
     sheet["A1"].alignment = Alignment(horizontal="left", vertical="center")
     sheet["A2"].font = font_cls(size=10, italic=True, color="404040")
@@ -906,7 +885,7 @@ def _title(sheet: object, title: str, font_cls: object, fill_cls: object) -> Non
     sheet["A2"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
     sheet.merge_cells("A1:H1")
     sheet.merge_cells("A2:H2")
-    sheet.row_dimensions[1].height = 28
+    sheet.row_dimensions[1].height = 36
     sheet.row_dimensions[2].height = 34
 
 
@@ -942,7 +921,23 @@ def _size_columns(sheet: object, alignment_cls: object) -> None:
                 cell.alignment = alignment_cls(vertical="top", wrap_text=True)
             if isinstance(cell.value, float):
                 cell.number_format = "0.000"
-    sheet.row_dimensions[1].height = 28
+    if sheet.title in {"Summary", "QoS Summary", "QoE Summary", "Paper Metrics"}:
+        for row_index in range(5, sheet.max_row + 1):
+            longest = max(
+                len(str(sheet.cell(row_index, column_index).value))
+                if sheet.cell(row_index, column_index).value is not None
+                else 0
+                for column_index in range(1, sheet.max_column + 1)
+            )
+            if longest > 130:
+                sheet.row_dimensions[row_index].height = 58
+            elif longest > 80:
+                sheet.row_dimensions[row_index].height = 42
+            elif longest > 42:
+                sheet.row_dimensions[row_index].height = 30
+            else:
+                sheet.row_dimensions[row_index].height = 21
+    sheet.row_dimensions[1].height = 36
     sheet.row_dimensions[2].height = 34
     sheet.row_dimensions[3].height = 8
 
@@ -950,10 +945,6 @@ def _size_columns(sheet: object, alignment_cls: object) -> None:
 def _write_row(sheet: object, row_index: int, values: list[object] | tuple[object, ...]) -> None:
     for column_index, value in enumerate(values, start=1):
         sheet.cell(row_index, column_index, value)
-
-
-def _assessment(check: str, ok: bool, evidence: str, recommendation: str) -> tuple[str, str, str, str]:
-    return (check, "OK" if ok else "Review", evidence, recommendation)
 
 
 def _clean_metric_value(value: object) -> MetricValue:
@@ -1026,12 +1017,6 @@ def _client_sample_values(clients: list[ClientMetricState], field: str) -> list[
     return values
 
 
-def _payload_efficiency(latest: MetricRow) -> float:
-    payload = _as_float(latest.get("rx_audio_payload_bytes")) + _as_float(latest.get("relayed_payload_bytes"))
-    network = _as_float(latest.get("rx_audio_bytes")) + _as_float(latest.get("relayed_bytes"))
-    return round(percentage(payload, network), 3)
-
-
 def _max(rows: list[MetricRow], field: str) -> float:
     if not rows:
         return 0.0
@@ -1044,13 +1029,3 @@ def _column_letter(index: int) -> str:
         index, remainder = divmod(index - 1, 26)
         letters = chr(65 + remainder) + letters
     return letters or "A"
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result

@@ -421,28 +421,32 @@ def test_metrics_workbook_contains_processed_sheets(tmp_path):
         "QoS Summary",
         "QoE Summary",
         "Jitter CDF",
-        "Assessment",
         "Client Summary",
-        "Samples",
-        "Client Samples",
-        "Metric Guide",
+        "Time Series",
+        "Paper Metrics",
     ]
     assert workbook["Summary"]["A1"].value == "Secure Web Intercom Measurement Summary"
-    assert workbook["Summary"].row_dimensions[1].height >= 28
+    assert workbook["Summary"].row_dimensions[1].height >= 36
     assert workbook["Summary"].freeze_panes == "A5"
     assert len(workbook["Summary"]._charts) == 0
     summary_labels = [cell.value for cell in workbook["Summary"]["A"]]
     assert "Audio received" not in summary_labels
+    assert "Authentication failures" not in summary_labels
+    assert "P95 playout latency" in summary_labels
     assert workbook["QoS Summary"]["A1"].value == "Application-Level QoS Summary"
     assert len(workbook["QoS Summary"]._charts) == 1
     assert workbook["QoE Summary"]["A1"].value == "QoE and E-Model Summary"
     assert workbook["Client Summary"]["A4"].value == "client_id"
-    assert workbook["Samples"]["A4"].value == "timestamp"
-    sample_headers = [cell.value for cell in workbook["Samples"][4]]
+    client_headers = [cell.value for cell in workbook["Client Summary"][4]]
+    assert "malformed_audio_packets" not in client_headers
+    assert "captured_frames" not in client_headers
+    assert workbook["Time Series"]["A4"].value == "timestamp"
+    sample_headers = [cell.value for cell in workbook["Time Series"][4]]
     assert "rx_audio_bytes" not in sample_headers
     assert "relayed_bytes" not in sample_headers
     assert "browser_sent_bytes" not in sample_headers
-    assert workbook["Metric Guide"]["A4"].value == "Source"
+    assert "auth_failures" not in sample_headers
+    assert workbook["Paper Metrics"]["A4"].value == "Metric group"
 
 
 def test_qos_summary_late_drop_rate_uses_received_denominator(tmp_path):

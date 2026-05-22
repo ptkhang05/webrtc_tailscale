@@ -101,20 +101,18 @@ python -m web_intercom.server --host 0.0.0.0 --port 8443 --stats-interval 5 --me
 
 The workbook is updated every reporting interval and contains:
 
-- `Summary`: human-readable totals for the run.
-- `QoS Summary`: application-level QoS indicators, including estimated one-way delay, RFC 3550 inter-arrival jitter, network sequence gaps, late packet drops, buffer underrun duration, and AudioWorklet callback stability.
+- `Summary`: the selected paper-ready run metrics, including p95 delay, p95 jitter, late-drop rate, underrun duration, MOS, relay bitrate, relay drops, and browser timing stability.
+- `QoS Summary`: application-level QoS indicators: estimated one-way delay, RFC 3550 inter-arrival jitter, sequence-gap rate, late-drop rate, underruns, relay-drop rate, and peak relay payload bitrate.
 - `QoE Summary`: estimated R-factor and MOS values using a simplified ITU-T G.107 E-model.
-- `Jitter CDF`: percentile table and chart for RFC 3550 jitter.
-- `Assessment`: `OK` / `Review` checks with evidence and recommendations.
-- `Client Summary`: latest browser-side capture/playback/QoS/QoE metrics per connected client.
-- `Samples`: processed server-side measurement intervals, including network bitrate, payload bitrate, packet rate, and aggregated browser QoS/QoE columns.
-- `Client Samples`: browser-reported metric samples over time.
-- `Metric Guide`: plain-language definitions for every metric.
+- `Jitter CDF`: percentile table and chart for RFC 3550 jitter, intended as the main chart source for paper figures.
+- `Client Summary`: latest per-browser QoS/QoE and validity metrics.
+- `Time Series`: compact interval samples for plotting paper figures across LAN/Wi-Fi/congested scenarios.
+- `Paper Metrics`: an explanation of which metrics are suitable for the paper and how to use them.
 
 Browsers automatically send client-side measurement data to the server. You do not need to install anything on client machines.
 
 Workbook generation runs in a separate process so report writing does not compete with the server event loop for Python's GIL during audio relay.
-The front sheets intentionally show processed QoS/QoE indicators instead of raw byte dumps. Detailed packet and browser samples remain available on the `Samples` and `Client Samples` sheets for audit work.
+The workbook intentionally excludes raw byte dumps and routine implementation counters from the visible report. It focuses on metrics that can support an IEEE-style experimental section: delay, jitter, late delivery, playout continuity, MOS, relay scalability, and browser capture stability.
 
 Do not keep the workbook open in Excel while the server is running. Windows may lock the file; if that happens, close Excel and the next reporting interval will retry the update.
 
