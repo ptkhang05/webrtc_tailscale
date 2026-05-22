@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, field
 import getpass
 import hmac
@@ -17,7 +19,7 @@ from typing import Iterable
 from aiohttp import WSMsgType, web
 
 from .certs import ensure_self_signed_cert, local_ipv4_addresses
-from .metrics import WebIntercomMetrics
+from .metrics import WebIntercomMetrics, write_metrics_workbook
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -26,6 +28,7 @@ MAX_AUDIO_FRAME_BYTES = 64_000
 AUDIO_PACKET_MAGIC = b"SWI1"
 AUDIO_PACKET_HEADER_BYTES = 20
 AUDIO_RELAY_SEND_TIMEOUT_SECONDS = 0.02
+RELAY_QUEUE_MAX_PACKETS = 4
 STATIC_DIR_KEY = web.AppKey("static_dir", Path)
 
 
@@ -36,8 +39,11 @@ class Client:
     name: str
     room: str
     joined_at: float
-    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-    send_pending: bool = field(default=False, repr=False)
+    relay_queue: asyncio.Queue[tuple[bytes, int]] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=RELAY_QUEUE_MAX_PACKETS),
+        repr=False,
+    )
+    relay_worker: asyncio.Task[None] | None = field(default=None, repr=False)
     stream_ids: set[int] = field(default_factory=set, repr=False)
 
 
@@ -50,6 +56,7 @@ class WebIntercomServer:
         self.lock = asyncio.Lock()
         self.metrics = WebIntercomMetrics()
         self.relay_tasks: set[asyncio.Task[None]] = set()
+        self.metrics_executor: ProcessPoolExecutor | None = None
 
     async def index(self, request: web.Request) -> web.Response:
         return web.FileResponse(request.app[STATIC_DIR_KEY] / "index.html")
@@ -90,6 +97,7 @@ class WebIntercomServer:
             client_id = self.metrics.next_client_id()
             joined_at = time.monotonic()
             client = Client(websocket=websocket, client_id=client_id, name=name, room=room, joined_at=joined_at)
+            self.start_relay_worker(client)
             async with self.lock:
                 self.clients[websocket] = client
             self.metrics.record_join(client_id, name, room, joined_at)
@@ -111,6 +119,7 @@ class WebIntercomServer:
             if client is not None:
                 async with self.lock:
                     self.clients.pop(websocket, None)
+                await self.stop_relay_worker(client)
                 self.metrics.record_leave(client.client_id)
                 await self.broadcast_presence(client.room)
                 print(f"Left {client.name} from room {client.room}")
@@ -135,24 +144,58 @@ class WebIntercomServer:
             task.add_done_callback(self.relay_tasks.discard)
         recipients = await self.room_recipient_clients(sender.room, exclude=sender.websocket)
         for recipient in recipients:
-            if recipient.send_pending or recipient.send_lock.locked():
+            try:
+                recipient.relay_queue.put_nowait((data, payload_size))
+            except asyncio.QueueFull:
                 self.metrics.inc("relay_send_drops")
-                continue
-            recipient.send_pending = True
-            task = asyncio.create_task(self.send_audio_to_recipient(recipient, data, payload_size))
-            self.relay_tasks.add(task)
-            task.add_done_callback(self.relay_tasks.discard)
 
-    async def send_audio_to_recipient(self, recipient: Client, data: bytes, payload_size: int) -> None:
+    def start_relay_worker(self, recipient: Client) -> None:
+        if recipient.relay_worker is not None and not recipient.relay_worker.done():
+            return
+        task = asyncio.create_task(self.relay_worker(recipient))
+        recipient.relay_worker = task
+        self.relay_tasks.add(task)
+        task.add_done_callback(self.relay_tasks.discard)
+
+    async def stop_relay_worker(self, recipient: Client) -> None:
+        if recipient.relay_worker is None:
+            return
+        recipient.relay_worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await recipient.relay_worker
+        recipient.relay_worker = None
+
+    async def relay_worker(self, recipient: Client) -> None:
+        while True:
+            data, payload_size = await recipient.relay_queue.get()
+            try:
+                delivered = await self.send_audio_to_recipient(recipient, data, payload_size)
+                if not delivered:
+                    self.drop_queued_audio(recipient)
+            finally:
+                recipient.relay_queue.task_done()
+
+    def drop_queued_audio(self, recipient: Client) -> None:
+        dropped = 0
+        while True:
+            try:
+                recipient.relay_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            recipient.relay_queue.task_done()
+            dropped += 1
+        if dropped:
+            self.metrics.inc("relay_send_drops", dropped)
+
+    async def send_audio_to_recipient(self, recipient: Client, data: bytes, payload_size: int) -> bool:
         try:
-            async with recipient.send_lock:
-                async with asyncio.timeout(AUDIO_RELAY_SEND_TIMEOUT_SECONDS):
-                    await recipient.websocket.send_bytes(data)
+            async with asyncio.timeout(AUDIO_RELAY_SEND_TIMEOUT_SECONDS):
+                await recipient.websocket.send_bytes(data)
             self.metrics.record_audio_relay(len(data), payload_size)
+            return True
         except (asyncio.TimeoutError, ConnectionError, RuntimeError):
             self.metrics.inc("relay_send_drops")
-        finally:
-            recipient.send_pending = False
+            return False
 
     async def handle_text(self, sender: Client, data: str) -> None:
         try:
@@ -232,7 +275,7 @@ class WebIntercomServer:
             row = self.metrics.sample(active_clients)
             if metrics_xlsx:
                 try:
-                    await asyncio.to_thread(self.metrics.write_workbook, metrics_xlsx)
+                    await self.write_metrics_workbook(metrics_xlsx)
                 except PermissionError:
                     print(
                         f"[metrics] Could not update {metrics_xlsx}; close it in Excel and the next interval will retry.",
@@ -248,6 +291,28 @@ class WebIntercomServer:
                 f"xlsx={metrics_xlsx or 'off'}",
                 flush=True,
             )
+
+    async def write_metrics_workbook(self, metrics_xlsx: str) -> None:
+        server_samples, client_states = self.metrics.snapshot()
+        if self.metrics_executor is None:
+            self.metrics_executor = ProcessPoolExecutor(max_workers=1)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self.metrics_executor,
+            write_metrics_workbook,
+            Path(metrics_xlsx),
+            server_samples,
+            client_states,
+        )
+
+    async def close(self) -> None:
+        async with self.lock:
+            clients = list(self.clients.values())
+        for client in clients:
+            await self.stop_relay_worker(client)
+        if self.metrics_executor is not None:
+            self.metrics_executor.shutdown(wait=False, cancel_futures=True)
+            self.metrics_executor = None
 
 
 def audio_payload_size(data: bytes) -> int | None:
@@ -295,6 +360,9 @@ def create_app(
         task = _app.get("stats_task")
         if task is not None:
             task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await relay.close()
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)

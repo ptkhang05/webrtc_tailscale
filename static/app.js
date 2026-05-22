@@ -331,6 +331,9 @@ function disconnect(closeSocket = true) {
     }
     mediaStream = null;
   }
+  for (const state of remoteStreams.values()) {
+    stopActiveNodes(state);
+  }
   if (audioContext) {
     audioContext.close();
     audioContext = null;

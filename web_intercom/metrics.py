@@ -118,7 +118,7 @@ CLIENT_GUIDE = {
     "last_rx_kbps": ("Latest receive bitrate", "kbps", "Browser-calculated receive bitrate in the latest UI interval."),
     "playback_queue_seconds": ("Playback queue", "seconds", "Estimated browser playback buffer delay."),
     "estimated_playout_latency_ms": ("Estimated playout latency", "ms", "Estimated one-way network delay plus current playback queue delay and capture quantum."),
-    "late_drop_rate_percent": ("Late drop rate", "%", "Late dropped packets divided by received packets plus late drops."),
+    "late_drop_rate_percent": ("Late drop rate", "%", "Late dropped packets divided by received packets."),
     "buffer_underrun_rate_per_min": ("Buffer underrun rate", "events/min", "Playback underrun events normalized by browser session duration."),
     "r_factor": ("E-model R-factor", "score", "Simplified ITU-T G.107 R-factor estimated from delay and late/drop impairment."),
     "estimated_mos": ("Estimated MOS", "MOS", "Estimated Mean Opinion Score mapped from the R-factor."),
@@ -378,7 +378,7 @@ def derive_client_qoe_metrics(metrics: Mapping[str, object]) -> MetricRow:
 
     late_drops = _as_float(metrics.get("late_dropped_packets"))
     received_packets = _as_float(metrics.get("received_packets"))
-    late_drop_rate_percent = percentage(late_drops, received_packets + late_drops)
+    late_drop_rate_percent = percentage(late_drops, received_packets)
 
     session_duration_seconds = _as_float(metrics.get("session_duration_seconds"))
     underrun_rate_per_min = 0.0

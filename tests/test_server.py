@@ -3,9 +3,10 @@ import time
 
 from openpyxl import load_workbook
 
-from web_intercom.metrics import estimate_e_model
+from web_intercom.metrics import derive_client_qoe_metrics, estimate_e_model
 from web_intercom.server import (
     Client,
+    RELAY_QUEUE_MAX_PACKETS,
     WebIntercomServer,
     audio_payload_size,
     audio_stream_id,
@@ -71,12 +72,16 @@ def test_handle_audio_does_not_block_on_slow_recipient():
         relay.clients[sender_ws] = sender
         relay.clients[slow_ws] = slow
         packet = b"SWI1" + b"\x00" * 16 + b"pcm"
+        relay.start_relay_worker(slow)
 
-        started_at = time.perf_counter()
-        await relay.handle_audio(sender, packet)
-        elapsed = time.perf_counter() - started_at
-        await asyncio.sleep(0.05)
-        sample = relay.metrics.sample([])
+        try:
+            started_at = time.perf_counter()
+            await relay.handle_audio(sender, packet)
+            elapsed = time.perf_counter() - started_at
+            await asyncio.sleep(0.05)
+            sample = relay.metrics.sample([])
+        finally:
+            await relay.stop_relay_worker(slow)
 
         assert elapsed < 0.05
         assert sample["rx_audio_packets"] == 1
@@ -100,10 +105,10 @@ def test_handle_audio_registers_sender_stream_id():
     asyncio.run(run())
 
 
-def test_handle_audio_drops_when_recipient_send_is_pending():
+def test_handle_audio_drops_when_recipient_relay_queue_is_full():
     class HealthyWebSocket:
         async def send_bytes(self, data: bytes) -> None:
-            raise AssertionError("send should not be scheduled while pending")
+            raise AssertionError("send should not be scheduled when the relay queue is full")
 
     async def run() -> None:
         relay = WebIntercomServer("secret")
@@ -112,7 +117,8 @@ def test_handle_audio_drops_when_recipient_send_is_pending():
         sender = Client(sender_ws, "client-0001", "alice", "main", time.monotonic())
         sender.stream_ids.add(0)
         recipient = Client(recipient_ws, "client-0002", "bob", "main", time.monotonic())
-        recipient.send_pending = True
+        for _ in range(RELAY_QUEUE_MAX_PACKETS):
+            recipient.relay_queue.put_nowait((b"old", 3))
         relay.clients[sender_ws] = sender
         relay.clients[recipient_ws] = recipient
         packet = b"SWI1" + b"\x00" * 16 + b"pcm"
@@ -121,6 +127,7 @@ def test_handle_audio_drops_when_recipient_send_is_pending():
         sample = relay.metrics.sample([])
 
         assert len(relay.relay_tasks) == 0
+        assert recipient.relay_queue.qsize() == RELAY_QUEUE_MAX_PACKETS
         assert sample["rx_audio_packets"] == 1
         assert sample["relay_send_drops"] == 1
 
@@ -192,6 +199,20 @@ def test_e_model_degrades_with_delay_and_late_drop():
     assert 1 <= poor_mos <= 4.5
 
 
+def test_client_late_drop_rate_uses_received_packets_denominator():
+    derived = derive_client_qoe_metrics(
+        {
+            "received_packets": 10,
+            "late_dropped_packets": 2,
+            "playback_queue_seconds": 0,
+            "estimated_owd_ms": 0,
+            "callback_interval_mean_ms": 8,
+        }
+    )
+
+    assert derived["late_drop_rate_percent"] == 20.0
+
+
 def test_metrics_workbook_contains_processed_sheets(tmp_path):
     relay = WebIntercomServer("secret")
     joined_at = time.monotonic()
@@ -243,3 +264,30 @@ def test_metrics_workbook_contains_processed_sheets(tmp_path):
     assert workbook["Client Summary"]["A4"].value == "client_id"
     assert workbook["Samples"]["A4"].value == "timestamp"
     assert workbook["Metric Guide"]["A4"].value == "Source"
+
+
+def test_async_workbook_writer_uses_picklable_snapshot(tmp_path):
+    async def run() -> None:
+        relay = WebIntercomServer("secret")
+        relay.metrics.record_join("client-0001", "alice", "main", time.monotonic())
+        relay.metrics.record_client_metrics(
+            "client-0001",
+            {
+                "received_packets": 10,
+                "late_dropped_packets": 1,
+                "playback_queue_seconds": 0.01,
+                "estimated_owd_ms": 2,
+                "callback_interval_mean_ms": 8,
+            },
+        )
+        relay.metrics.sample([("client-0001", "alice", "main")])
+        output = tmp_path / "async_metrics.xlsx"
+
+        try:
+            await relay.write_metrics_workbook(str(output))
+        finally:
+            await relay.close()
+
+        assert output.exists()
+
+    asyncio.run(run())

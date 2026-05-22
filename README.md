@@ -101,6 +101,8 @@ The workbook is updated every reporting interval and contains:
 
 Browsers automatically send client-side measurement data to the server. You do not need to install anything on client machines.
 
+Workbook generation runs in a separate process so report writing does not compete with the server event loop for Python's GIL during audio relay.
+
 Do not keep the workbook open in Excel while the server is running. Windows may lock the file; if that happens, close Excel and the next reporting interval will retry the update.
 
 ### Measurement Notes
@@ -139,7 +141,7 @@ New-NetFirewallRule -DisplayName "Secure Web Intercom HTTPS 8443" -Direction Inb
 - Audio capture uses `AudioWorklet` instead of the deprecated `ScriptProcessorNode`, so capture work is isolated from the browser UI thread.
 - The client requests `AudioContext({ sampleRate: 16000 })`. If the actual `AudioContext.sampleRate` differs, captured audio is resampled to 16 kHz with `OfflineAudioContext` before transmission. Received PCM16 is placed in a 16 kHz `AudioBuffer` so the browser performs playback resampling instead of nearest-neighbor JavaScript scaling.
 - Audio packets carry stream ID, sequence number, and capture timestamp fields so browsers can measure jitter, late drops, buffer underruns, and callback stability.
-- Server relay sends are isolated per recipient with short timeouts. If a recipient already has a pending send, the next packet for that recipient is dropped immediately instead of creating a hidden task queue.
+- Server relay sends are isolated per recipient with a bounded 4-packet relay queue and short send timeout. If a recipient queue is full, new packets for that recipient are dropped immediately instead of allowing hidden backlog growth.
 - Audio is still sent as uncompressed PCM16 over WebSocket/TCP. This is simple and measurable, but Wi-Fi loss or congestion can increase latency because TCP preserves order.
 
 ## Roadmap
