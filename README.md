@@ -14,10 +14,15 @@ This is the browser-client version of the secure LAN voice intercom. Client mach
 
 ## Setup on the Server Machine
 
+Install Python 3.12, then clone the project and install the Python dependencies:
+
 ```powershell
-cd "D:\secure-digital-voice-intercom-system-web"
+git clone https://github.com/Khang2kruoi/secure-web-intercom.git
+cd secure-web-intercom
 python -m pip install -r requirements.txt
 ```
+
+If you downloaded the project as a ZIP file instead of using Git, open a terminal in the extracted project folder and run the same `python -m pip install -r requirements.txt` command.
 
 ## Run
 
