@@ -5,6 +5,7 @@ __pycache__/
 certs/
 *.pdf
 *.xlsx
+matlab_metrics/
 extracted_pdf_text.txt
 AGENTS.md
 conference_101719.tex

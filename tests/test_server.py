@@ -1,10 +1,9 @@
 import asyncio
+import csv
 import os
 import ssl
 import time
 from unittest.mock import patch
-
-from openpyxl import load_workbook
 
 from web_intercom.certs import ensure_self_signed_cert
 from web_intercom.metrics import derive_client_qoe_metrics, estimate_e_model
@@ -31,7 +30,7 @@ def test_parser_defaults():
     assert args.host == "0.0.0.0"
     assert args.port == 8443
     assert args.stats_interval == 5.0
-    assert args.metrics_xlsx is None
+    assert args.metrics_dir is None
     assert args.max_clients == MAX_CLIENTS
     assert args.max_open_connections == MAX_OPEN_CONNECTIONS
     assert args.max_connections_per_ip == MAX_CONNECTIONS_PER_IP
@@ -381,7 +380,7 @@ def test_client_late_drop_rate_uses_received_packets_denominator():
     assert derived["late_drop_rate_percent"] == 20.0
 
 
-def test_metrics_workbook_contains_processed_sheets(tmp_path):
+def test_matlab_export_contains_processed_csv_bundle(tmp_path):
     relay = WebIntercomServer("secret")
     joined_at = time.monotonic()
     relay.metrics.record_join("client-0001", "alice", "main", joined_at)
@@ -411,45 +410,42 @@ def test_metrics_workbook_contains_processed_sheets(tmp_path):
     relay.metrics.record_audio_relay(660, 640)
     relay.metrics.sample([("client-0001", "alice", "main")])
     relay.metrics.sample([("client-0001", "alice", "main")])
-    output = tmp_path / "web_metrics.xlsx"
+    output = tmp_path / "matlab_metrics"
 
-    relay.metrics.write_workbook(output)
+    relay.metrics.write_matlab_export(output)
 
-    workbook = load_workbook(output, data_only=True)
-    assert workbook.sheetnames == [
-        "Summary",
-        "QoS Summary",
-        "QoE Summary",
-        "Jitter CDF",
-        "Client Summary",
-        "Time Series",
-        "Paper Metrics",
-    ]
-    assert workbook["Summary"]["A1"].value == "Secure Web Intercom Measurement Summary"
-    assert workbook["Summary"].row_dimensions[1].height >= 36
-    assert workbook["Summary"].freeze_panes == "A5"
-    assert len(workbook["Summary"]._charts) == 0
-    summary_labels = [cell.value for cell in workbook["Summary"]["A"]]
+    expected_files = {
+        "summary_metrics.csv",
+        "qos_summary.csv",
+        "qoe_summary.csv",
+        "jitter_cdf.csv",
+        "client_summary.csv",
+        "time_series.csv",
+        "paper_metrics.csv",
+        "plot_intercom_metrics.m",
+    }
+    assert {path.name for path in output.iterdir()} == expected_files
+
+    summary_rows = _read_csv(output / "summary_metrics.csv")
+    summary_labels = [row["metric"] for row in summary_rows]
     assert "Audio received" not in summary_labels
     assert "Authentication failures" not in summary_labels
     assert "P95 playout latency" in summary_labels
-    assert workbook["QoS Summary"]["A1"].value == "Application-Level QoS Summary"
-    assert len(workbook["QoS Summary"]._charts) == 1
-    assert workbook["QoE Summary"]["A1"].value == "QoE and E-Model Summary"
-    assert workbook["Client Summary"]["A4"].value == "client_id"
-    client_headers = [cell.value for cell in workbook["Client Summary"][4]]
+
+    client_headers = _csv_headers(output / "client_summary.csv")
     assert "malformed_audio_packets" not in client_headers
     assert "captured_frames" not in client_headers
-    assert workbook["Time Series"]["A4"].value == "timestamp"
-    sample_headers = [cell.value for cell in workbook["Time Series"][4]]
+
+    sample_headers = _csv_headers(output / "time_series.csv")
+    assert sample_headers[0] == "timestamp"
     assert "rx_audio_bytes" not in sample_headers
     assert "relayed_bytes" not in sample_headers
     assert "browser_sent_bytes" not in sample_headers
     assert "auth_failures" not in sample_headers
-    assert workbook["Paper Metrics"]["A4"].value == "Metric group"
+    assert (output / "plot_intercom_metrics.m").read_text(encoding="utf-8").startswith("% Plot processed")
 
 
-def test_qos_summary_late_drop_rate_uses_received_denominator(tmp_path):
+def test_qos_summary_csv_late_drop_rate_uses_received_denominator(tmp_path):
     relay = WebIntercomServer("secret")
     relay.metrics.record_join("client-0001", "alice", "main", time.monotonic())
     relay.metrics.record_client_metrics(
@@ -463,16 +459,15 @@ def test_qos_summary_late_drop_rate_uses_received_denominator(tmp_path):
         },
     )
     relay.metrics.sample([("client-0001", "alice", "main")])
-    output = tmp_path / "qos_drop_rate.xlsx"
+    output = tmp_path / "matlab_metrics"
 
-    relay.metrics.write_workbook(output)
+    relay.metrics.write_matlab_export(output)
 
-    sheet = load_workbook(output, data_only=True)["QoS Summary"]
-    values = {row[0].value: row[1].value for row in sheet.iter_rows(min_row=5, max_col=2)}
-    assert values["Late drop rate"] == 20
+    values = {row["metric"]: row["value"] for row in _read_csv(output / "qos_summary.csv")}
+    assert float(values["Late drop rate"]) == 20
 
 
-def test_async_workbook_writer_uses_picklable_snapshot(tmp_path):
+def test_async_matlab_export_writer_creates_bundle(tmp_path):
     async def run() -> None:
         relay = WebIntercomServer("secret")
         relay.metrics.record_join("client-0001", "alice", "main", time.monotonic())
@@ -487,13 +482,25 @@ def test_async_workbook_writer_uses_picklable_snapshot(tmp_path):
             },
         )
         relay.metrics.sample([("client-0001", "alice", "main")])
-        output = tmp_path / "async_metrics.xlsx"
+        output = tmp_path / "async_metrics"
 
         try:
-            await relay.write_metrics_workbook(str(output))
+            await relay.write_matlab_export(str(output))
         finally:
             await relay.close()
 
-        assert output.exists()
+        assert (output / "time_series.csv").exists()
+        assert (output / "plot_intercom_metrics.m").exists()
 
     asyncio.run(run())
+
+
+def _read_csv(path):
+    with path.open(newline="", encoding="utf-8") as file:
+        return list(csv.DictReader(file))
+
+
+def _csv_headers(path):
+    with path.open(newline="", encoding="utf-8") as file:
+        reader = csv.reader(file)
+        return next(reader)

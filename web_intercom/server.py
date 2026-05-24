@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import defaultdict, deque
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
 import getpass
@@ -20,7 +19,7 @@ from typing import Iterable
 from aiohttp import WSMsgType, web
 
 from .certs import ensure_self_signed_cert, local_ipv4_addresses
-from .metrics import WebIntercomMetrics, write_metrics_workbook
+from .metrics import WebIntercomMetrics, write_matlab_export
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -79,7 +78,6 @@ class WebIntercomServer:
         self.lock = asyncio.Lock()
         self.metrics = WebIntercomMetrics()
         self.relay_tasks: set[asyncio.Task[None]] = set()
-        self.metrics_executor: ProcessPoolExecutor | None = None
 
     async def index(self, request: web.Request) -> web.Response:
         return web.FileResponse(request.app[STATIC_DIR_KEY] / "index.html")
@@ -361,7 +359,7 @@ class WebIntercomServer:
         except Exception:
             return
 
-    async def stats_loop(self, interval: float, metrics_xlsx: str | None) -> None:
+    async def stats_loop(self, interval: float, metrics_dir: str | None) -> None:
         while True:
             await asyncio.sleep(interval)
             try:
@@ -369,14 +367,14 @@ class WebIntercomServer:
                     active_clients = [
                         (client.client_id, client.name, client.room)
                         for client in self.clients.values()
-                    ]
+                ]
                 row = self.metrics.sample(active_clients)
-                if metrics_xlsx:
+                if metrics_dir:
                     try:
-                        await self.write_metrics_workbook(metrics_xlsx)
-                    except PermissionError:
+                        await self.write_matlab_export(metrics_dir)
+                    except OSError as exc:
                         print(
-                            f"[metrics] Could not update {metrics_xlsx}; close it in Excel and the next interval will retry.",
+                            f"[metrics] Could not update MATLAB export directory {metrics_dir}: {exc}",
                             flush=True,
                         )
                 print(
@@ -386,7 +384,7 @@ class WebIntercomServer:
                     f"relayed_packets={row['relayed_packets']} "
                     f"rx_kbps={row['avg_rx_kbps']} "
                     f"relayed_kbps={row['avg_relayed_kbps']} "
-                    f"xlsx={metrics_xlsx or 'off'}",
+                    f"matlab={metrics_dir or 'off'}",
                     flush=True,
                 )
             except Exception as exc:
@@ -395,27 +393,15 @@ class WebIntercomServer:
                     flush=True,
                 )
 
-    async def write_metrics_workbook(self, metrics_xlsx: str) -> None:
+    async def write_matlab_export(self, metrics_dir: str) -> None:
         server_samples, client_states = self.metrics.snapshot()
-        if self.metrics_executor is None:
-            self.metrics_executor = ProcessPoolExecutor(max_workers=1)
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            self.metrics_executor,
-            write_metrics_workbook,
-            Path(metrics_xlsx),
-            server_samples,
-            client_states,
-        )
+        await asyncio.to_thread(write_matlab_export, Path(metrics_dir), server_samples, client_states)
 
     async def close(self) -> None:
         async with self.lock:
             clients = list(self.clients.values())
         for client in clients:
             await self.stop_relay_worker(client)
-        if self.metrics_executor is not None:
-            self.metrics_executor.shutdown(wait=False, cancel_futures=True)
-            self.metrics_executor = None
 
 
 def audio_payload_size(data: bytes) -> int | None:
@@ -445,7 +431,7 @@ def create_app(
     room_key: str,
     static_dir: Path,
     stats_interval: float,
-    metrics_xlsx: str | None = None,
+    metrics_dir: str | None = None,
     max_clients: int = MAX_CLIENTS,
     max_open_connections: int = MAX_OPEN_CONNECTIONS,
     max_connections_per_ip: int = MAX_CONNECTIONS_PER_IP,
@@ -467,9 +453,9 @@ def create_app(
     app.router.add_static("/static", static_dir, show_index=False)
 
     async def on_startup(_app: web.Application) -> None:
-        if stats_interval > 0 or metrics_xlsx:
+        if stats_interval > 0 or metrics_dir:
             interval = stats_interval if stats_interval > 0 else 5.0
-            _app["stats_task"] = asyncio.create_task(relay.stats_loop(interval, metrics_xlsx))
+            _app["stats_task"] = asyncio.create_task(relay.stats_loop(interval, metrics_dir))
 
     async def on_cleanup(_app: web.Application) -> None:
         task = _app.get("stats_task")
@@ -492,8 +478,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cert-dir", default="certs", help="Directory for generated self-signed HTTPS certificate.")
     parser.add_argument("--stats-interval", type=float, default=5.0, help="Print server stats every N seconds.")
     parser.add_argument(
-        "--metrics-xlsx",
-        help="Write processed measurement data to this Excel workbook.",
+        "--metrics-dir",
+        help="Write processed CSV data and plot_intercom_metrics.m for MATLAB to this directory.",
     )
     parser.add_argument("--max-clients", type=int, default=MAX_CLIENTS, help="Maximum authenticated clients. Default: %(default)s")
     parser.add_argument(
@@ -543,7 +529,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         room_key,
         static_dir,
         args.stats_interval,
-        args.metrics_xlsx,
+        args.metrics_dir,
         max_clients=args.max_clients,
         max_open_connections=args.max_open_connections,
         max_connections_per_ip=args.max_connections_per_ip,
