@@ -425,28 +425,27 @@ def test_metrics_workbook_contains_processed_sheets(tmp_path):
         "Time Series",
         "Paper Metrics",
     ]
-    assert workbook["Summary"]["A1"].value == "Secure Web Intercom Measurement Summary"
-    assert workbook["Summary"].row_dimensions[1].height >= 36
-    assert workbook["Summary"].freeze_panes == "A5"
-    assert len(workbook["Summary"]._charts) == 0
+    assert workbook["Summary"]["A1"].value == "Metric"
+    assert workbook["Summary"].sheet_view.showGridLines is not False
+    assert workbook["Summary"].freeze_panes is None
+    assert all(len(sheet._charts) == 0 for sheet in workbook.worksheets)
     summary_labels = [cell.value for cell in workbook["Summary"]["A"]]
     assert "Audio received" not in summary_labels
     assert "Authentication failures" not in summary_labels
     assert "P95 playout latency" in summary_labels
-    assert workbook["QoS Summary"]["A1"].value == "Application-Level QoS Summary"
-    assert len(workbook["QoS Summary"]._charts) == 1
-    assert workbook["QoE Summary"]["A1"].value == "QoE and E-Model Summary"
-    assert workbook["Client Summary"]["A4"].value == "client_id"
-    client_headers = [cell.value for cell in workbook["Client Summary"][4]]
+    assert workbook["QoS Summary"]["A1"].value == "Metric"
+    assert workbook["QoE Summary"]["A1"].value == "Metric"
+    assert workbook["Client Summary"]["A1"].value == "client_id"
+    client_headers = [cell.value for cell in workbook["Client Summary"][1]]
     assert "malformed_audio_packets" not in client_headers
     assert "captured_frames" not in client_headers
-    assert workbook["Time Series"]["A4"].value == "timestamp"
-    sample_headers = [cell.value for cell in workbook["Time Series"][4]]
+    assert workbook["Time Series"]["A1"].value == "timestamp"
+    sample_headers = [cell.value for cell in workbook["Time Series"][1]]
     assert "rx_audio_bytes" not in sample_headers
     assert "relayed_bytes" not in sample_headers
     assert "browser_sent_bytes" not in sample_headers
     assert "auth_failures" not in sample_headers
-    assert workbook["Paper Metrics"]["A4"].value == "Metric group"
+    assert workbook["Paper Metrics"]["A1"].value == "Metric group"
 
 
 def test_qos_summary_late_drop_rate_uses_received_denominator(tmp_path):
@@ -468,7 +467,7 @@ def test_qos_summary_late_drop_rate_uses_received_denominator(tmp_path):
     relay.metrics.write_workbook(output)
 
     sheet = load_workbook(output, data_only=True)["QoS Summary"]
-    values = {row[0].value: row[1].value for row in sheet.iter_rows(min_row=5, max_col=2)}
+    values = {row[0].value: row[1].value for row in sheet.iter_rows(min_row=2, max_col=2)}
     assert values["Late drop rate"] == 20
 
 

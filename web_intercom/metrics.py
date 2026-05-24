@@ -456,9 +456,6 @@ def write_metrics_workbook(
 ) -> None:
     try:
         from openpyxl import Workbook
-        from openpyxl.chart import LineChart, Reference
-        from openpyxl.styles import Alignment, Font, PatternFill
-        from openpyxl.worksheet.table import Table, TableStyleInfo
     except ImportError as exc:
         raise RuntimeError("Excel export requires openpyxl. Run: python -m pip install -r requirements.txt") from exc
 
@@ -474,30 +471,22 @@ def write_metrics_workbook(
     paper_metrics = workbook.create_sheet("Paper Metrics")
 
     latest = server_samples[-1] if server_samples else {}
-    _build_summary(summary, latest, server_samples, client_states, Font, PatternFill)
-    _build_qos_summary(qos_summary, latest, server_samples, client_states, Font, PatternFill)
-    _build_qoe_summary(qoe_summary, latest, client_states, Font, PatternFill)
-    _build_jitter_cdf(jitter_cdf, client_states, LineChart, Reference, Font, PatternFill)
-    _build_client_summary(client_summary, client_states, Table, TableStyleInfo, Font, PatternFill)
-    _build_time_series(time_series, server_samples, Table, TableStyleInfo, Font, PatternFill)
-    _build_paper_metrics(paper_metrics, Font, PatternFill)
-    _add_qos_chart(qos_summary, server_samples, LineChart, Reference)
-
-    for sheet in workbook.worksheets:
-        sheet.sheet_view.showGridLines = False
-        sheet.freeze_panes = "A5"
-        _size_columns(sheet, Alignment)
+    _build_summary(summary, latest, server_samples, client_states)
+    _build_qos_summary(qos_summary, latest, server_samples, client_states)
+    _build_qoe_summary(qoe_summary, latest, client_states)
+    _build_jitter_cdf(jitter_cdf, client_states)
+    _build_client_summary(client_summary, client_states)
+    _build_time_series(time_series, server_samples)
+    _build_paper_metrics(paper_metrics)
 
     temp_path = path.with_name(f"{path.stem}.tmp{path.suffix}")
     workbook.save(temp_path)
     temp_path.replace(path)
 
 
-def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clients: list[ClientMetricState], font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Secure Web Intercom Measurement Summary", font_cls, fill_cls)
+def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clients: list[ClientMetricState]) -> None:
     headers = ["Metric", "Value", "Unit", "Interpretation"]
-    _write_row(sheet, 4, headers)
-    _style_header(sheet, "A4:D4", font_cls, fill_cls)
+    _write_row(sheet, 1, headers)
 
     received = _as_float(latest.get("browser_received_packets"))
     relayed = _as_float(latest.get("relayed_packets"))
@@ -527,17 +516,13 @@ def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clie
         ("Resampled frames", _as_int(latest.get("browser_resampled_frames")), "frames", "Captured frames converted to 16 kHz when hardware sample rate differed."),
         ("Capture queue drops", _as_int(latest.get("browser_capture_queue_dropped_frames")), "frames", "Captured frames discarded before send due to client-side queue pressure."),
     ]
-    for index, row in enumerate(summary_rows, start=5):
+    for index, row in enumerate(summary_rows, start=2):
         _write_row(sheet, index, row)
-        if isinstance(row[1], float):
-            sheet.cell(index, 2).number_format = "0.000"
 
 
-def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clients: list[ClientMetricState], font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Application-Level QoS Summary", font_cls, fill_cls)
+def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clients: list[ClientMetricState]) -> None:
     headers = ["Metric", "Value", "Unit", "Interpretation"]
-    _write_row(sheet, 4, headers)
-    _style_header(sheet, "A4:D4", font_cls, fill_cls)
+    _write_row(sheet, 1, headers)
 
     jitter_values = _client_sample_values(clients, "rfc3550_jitter_ms")
     latency_values = _client_sample_values(clients, "estimated_playout_latency_ms")
@@ -564,17 +549,13 @@ def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], 
         ("Relay send drop rate", percentage(latest.get("relay_send_drops"), relayed), "%", "Server relay drops divided by relayed packets; captures bounded-queue pressure."),
         ("Peak relay payload bitrate", _max(rows, "interval_relayed_payload_kbps"), "kbps", "Peak forwarded PCM16 payload rate during a measurement interval."),
     ]
-    for index, row in enumerate(qos_rows, start=5):
+    for index, row in enumerate(qos_rows, start=2):
         _write_row(sheet, index, row)
-        if isinstance(row[1], float):
-            sheet.cell(index, 2).number_format = "0.000"
 
 
-def _build_qoe_summary(sheet: object, latest: MetricRow, clients: list[ClientMetricState], font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "QoE and E-Model Summary", font_cls, fill_cls)
+def _build_qoe_summary(sheet: object, latest: MetricRow, clients: list[ClientMetricState]) -> None:
     headers = ["Metric", "Value", "Unit", "Interpretation"]
-    _write_row(sheet, 4, headers)
-    _style_header(sheet, "A4:D4", font_cls, fill_cls)
+    _write_row(sheet, 1, headers)
 
     mos_values = _client_sample_values(clients, "estimated_mos")
     r_values = _client_sample_values(clients, "r_factor")
@@ -592,47 +573,31 @@ def _build_qoe_summary(sheet: object, latest: MetricRow, clients: list[ClientMet
         ("Latest quality class", quality_class, "", "Quality descriptor for the latest average MOS sample."),
         ("Target threshold", 3.6, "MOS", "Fair quality threshold commonly used as a minimum acceptable intercom target."),
         ("Threshold status", threshold_status, "", "Review if estimated MOS is below the fair-quality target."),
+        (
+            "Model note",
+            "Simplified E-model",
+            "",
+            "The MOS value is an objective estimate, not a subjective listening test; it uses measured delay, late packet drops, and a simplified ITU-T G.107 E-model mapping.",
+        ),
     ]
-    for index, row in enumerate(qoe_rows, start=5):
+    for index, row in enumerate(qoe_rows, start=2):
         _write_row(sheet, index, row)
-        if isinstance(row[1], float):
-            sheet.cell(index, 2).number_format = "0.000"
-
-    _write_row(sheet, 16, ["Model note"])
-    sheet["A16"].font = font_cls(bold=True)
-    sheet["A17"] = (
-        "The MOS value is an objective estimate, not a subjective listening test. "
-        "It uses measured delay, late packet drops, and a simplified ITU-T G.107 E-model mapping."
-    )
-    sheet.merge_cells("A17:D18")
 
 
-def _build_jitter_cdf(sheet: object, clients: list[ClientMetricState], chart_cls: object, reference_cls: object, font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "RFC3550 Jitter CDF", font_cls, fill_cls)
+def _build_jitter_cdf(sheet: object, clients: list[ClientMetricState]) -> None:
     fields = ["Percentile", "Jitter_ms"]
-    _write_row(sheet, 4, fields)
-    _style_header(sheet, "A4:B4", font_cls, fill_cls)
+    _write_row(sheet, 1, fields)
     values = _client_sample_values(clients, "rfc3550_jitter_ms")
     if not values:
-        _write_row(sheet, 5, [0, 0.0])
+        _write_row(sheet, 2, [0, 0.0])
         return
 
     percentiles = [0, 5, 10, 25, 50, 75, 90, 95, 99, 100]
-    for row_index, percentile in enumerate(percentiles, start=5):
+    for row_index, percentile in enumerate(percentiles, start=2):
         _write_row(sheet, row_index, [percentile, _percentile(values, percentile)])
 
-    chart = chart_cls()
-    _format_line_chart(chart, "Jitter CDF", "Jitter (ms)", "Percentile")
-    data = reference_cls(sheet, min_col=2, max_col=2, min_row=4, max_row=len(percentiles) + 4)
-    chart.add_data(data, titles_from_data=True)
-    categories = reference_cls(sheet, min_col=1, min_row=5, max_row=len(percentiles) + 4)
-    chart.set_categories(categories)
-    _style_chart_series(chart, ["4472C4"])
-    sheet.add_chart(chart, "D5")
 
-
-def _build_client_summary(sheet: object, clients: list[ClientMetricState], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Client Summary", font_cls, fill_cls)
+def _build_client_summary(sheet: object, clients: list[ClientMetricState]) -> None:
     fields = [
         "client_id",
         "name",
@@ -663,11 +628,10 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState], table
         "capture_queue_dropped_frames",
         "active_remote_streams",
     ]
-    _write_table(sheet, fields, [_client_summary_row(client) for client in clients], table_cls, style_cls, font_cls, fill_cls)
+    _write_table(sheet, fields, [_client_summary_row(client) for client in clients])
 
 
-def _build_time_series(sheet: object, rows: list[MetricRow], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Paper-Ready Time Series", font_cls, fill_cls)
+def _build_time_series(sheet: object, rows: list[MetricRow]) -> None:
     fields = [
         "timestamp",
         "uptime_seconds",
@@ -694,14 +658,12 @@ def _build_time_series(sheet: object, rows: list[MetricRow], table_cls: object, 
         "browser_resampled_frames",
         "browser_capture_queue_dropped_frames",
     ]
-    _write_table(sheet, fields, rows, table_cls, style_cls, font_cls, fill_cls)
+    _write_table(sheet, fields, rows)
 
 
-def _build_paper_metrics(sheet: object, font_cls: object, fill_cls: object) -> None:
-    _title(sheet, "Paper Metric Selection", font_cls, fill_cls)
+def _build_paper_metrics(sheet: object) -> None:
     fields = ["Metric group", "Exported metric", "Why it matters for the paper", "Use in Experimental Results"]
-    _write_row(sheet, 4, fields)
-    _style_header(sheet, "A4:D4", font_cls, fill_cls)
+    _write_row(sheet, 1, fields)
     rows = [
         (
             "Delay",
@@ -752,21 +714,14 @@ def _build_paper_metrics(sheet: object, font_cls: object, fill_cls: object) -> N
             "Use as validity checks, not as the headline result.",
         ),
     ]
-    for row_index, row in enumerate(rows, start=5):
+    for row_index, row in enumerate(rows, start=2):
         _write_row(sheet, row_index, row)
 
 
-def _write_table(sheet: object, fields: list[str], rows: list[Mapping[str, object]], table_cls: object, style_cls: object, font_cls: object, fill_cls: object) -> None:
-    _write_row(sheet, 4, fields)
-    _style_header(sheet, f"A4:{_column_letter(len(fields))}4", font_cls, fill_cls)
-    for row_index, row in enumerate(rows, start=5):
+def _write_table(sheet: object, fields: list[str], rows: list[Mapping[str, object]]) -> None:
+    _write_row(sheet, 1, fields)
+    for row_index, row in enumerate(rows, start=2):
         _write_row(sheet, row_index, [row.get(field, 0) for field in fields])
-    if rows:
-        table_ref = f"A4:{_column_letter(len(fields))}{len(rows) + 4}"
-        table_name = "".join(ch for ch in sheet.title if ch.isalnum())[:20] + "Table"
-        table = table_cls(displayName=table_name, ref=table_ref)
-        table.tableStyleInfo = style_cls(name="TableStyleMedium2", showRowStripes=True, showColumnStripes=False)
-        sheet.add_table(table)
 
 
 def _client_summary_row(client: ClientMetricState) -> MetricRow:
@@ -816,132 +771,6 @@ def _client_summary_row(client: ClientMetricState) -> MetricRow:
     }
 
 
-def _add_qos_chart(qos_summary: object, rows: list[MetricRow], chart_cls: object, reference_cls: object) -> None:
-    if len(rows) < 2:
-        return
-    helper_start_row = 4
-    helper_start_col = 7
-    headers = ["Sample", "OWD ms", "Jitter ms", "Latency ms"]
-    for offset, value in enumerate(headers):
-        qos_summary.cell(helper_start_row, helper_start_col + offset, value)
-    for row_index, sample in enumerate(rows, start=helper_start_row + 1):
-        qos_summary.cell(row_index, helper_start_col, row_index - helper_start_row)
-        qos_summary.cell(row_index, helper_start_col + 1, _as_float(sample.get("browser_avg_estimated_owd_ms")))
-        qos_summary.cell(row_index, helper_start_col + 2, _as_float(sample.get("browser_max_jitter_ms")))
-        qos_summary.cell(row_index, helper_start_col + 3, _as_float(sample.get("browser_avg_playout_latency_ms")))
-    for column_index in range(helper_start_col, helper_start_col + len(headers)):
-        qos_summary.column_dimensions[_column_letter(column_index)].hidden = True
-
-    chart = chart_cls()
-    _format_line_chart(chart, "QoS Delay Trend", "Milliseconds", "Sample")
-    data = reference_cls(
-        qos_summary,
-        min_col=helper_start_col + 1,
-        max_col=helper_start_col + 3,
-        min_row=helper_start_row,
-        max_row=helper_start_row + len(rows),
-    )
-    categories = reference_cls(
-        qos_summary,
-        min_col=helper_start_col,
-        min_row=helper_start_row + 1,
-        max_row=helper_start_row + len(rows),
-    )
-    chart.add_data(data, titles_from_data=True)
-    chart.set_categories(categories)
-    _style_chart_series(chart, ["4472C4", "70AD47", "C00000"])
-    qos_summary.add_chart(chart, "F5")
-
-
-def _format_line_chart(chart: object, title: str, y_title: str, x_title: str) -> None:
-    chart.title = title
-    chart.style = 2
-    chart.height = 6.0
-    chart.width = 11.5
-    chart.y_axis.title = y_title
-    chart.x_axis.title = x_title
-    chart.legend.position = "r"
-    chart.y_axis.numFmt = "0.0"
-    chart.x_axis.majorGridlines = None
-    chart.y_axis.majorGridlines = None
-
-
-def _style_chart_series(chart: object, colors: list[str]) -> None:
-    for series, color in zip(chart.series, colors):
-        series.graphicalProperties.line.solidFill = color
-        series.graphicalProperties.line.width = 22000
-
-
-def _title(sheet: object, title: str, font_cls: object, fill_cls: object) -> None:
-    from openpyxl.styles import Alignment
-
-    sheet["A1"] = title
-    sheet["A2"] = "Processed measurement workbook for browser-based secure LAN intercom."
-    sheet["A1"].font = font_cls(size=15, bold=True, color="FFFFFF")
-    sheet["A1"].fill = fill_cls("solid", fgColor="1F4E78")
-    sheet["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    sheet["A2"].font = font_cls(size=10, italic=True, color="404040")
-    sheet["A2"].fill = fill_cls("solid", fgColor="EAF2F8")
-    sheet["A2"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    sheet.merge_cells("A1:H1")
-    sheet.merge_cells("A2:H2")
-    sheet.row_dimensions[1].height = 36
-    sheet.row_dimensions[2].height = 34
-
-
-def _style_header(sheet: object, range_name: str, font_cls: object, fill_cls: object) -> None:
-    from openpyxl.styles import Alignment
-
-    for row in sheet[range_name]:
-        for cell in row:
-            cell.font = font_cls(bold=True, color="FFFFFF")
-            cell.fill = fill_cls("solid", fgColor="2F5597")
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            sheet.row_dimensions[cell.row].height = 22
-
-
-def _size_columns(sheet: object, alignment_cls: object) -> None:
-    from openpyxl.utils import get_column_letter
-
-    for column_index in range(1, sheet.max_column + 1):
-        letter = get_column_letter(column_index)
-        if sheet.column_dimensions[letter].hidden:
-            continue
-        width = max(
-            len(str(sheet.cell(row_index, column_index).value))
-            if sheet.cell(row_index, column_index).value is not None
-            else 0
-            for row_index in range(1, sheet.max_row + 1)
-        )
-        cap = 72 if column_index in (4, 5) else 34
-        sheet.column_dimensions[letter].width = min(max(width + 2, 12), cap)
-    for row in sheet.iter_rows():
-        for cell in row:
-            if cell.row not in (1, 2, 4):
-                cell.alignment = alignment_cls(vertical="top", wrap_text=True)
-            if isinstance(cell.value, float):
-                cell.number_format = "0.000"
-    if sheet.title in {"Summary", "QoS Summary", "QoE Summary", "Paper Metrics"}:
-        for row_index in range(5, sheet.max_row + 1):
-            longest = max(
-                len(str(sheet.cell(row_index, column_index).value))
-                if sheet.cell(row_index, column_index).value is not None
-                else 0
-                for column_index in range(1, sheet.max_column + 1)
-            )
-            if longest > 130:
-                sheet.row_dimensions[row_index].height = 58
-            elif longest > 80:
-                sheet.row_dimensions[row_index].height = 42
-            elif longest > 42:
-                sheet.row_dimensions[row_index].height = 30
-            else:
-                sheet.row_dimensions[row_index].height = 21
-    sheet.row_dimensions[1].height = 36
-    sheet.row_dimensions[2].height = 34
-    sheet.row_dimensions[3].height = 8
-
-
 def _write_row(sheet: object, row_index: int, values: list[object] | tuple[object, ...]) -> None:
     for column_index, value in enumerate(values, start=1):
         sheet.cell(row_index, column_index, value)
@@ -964,10 +793,6 @@ def _as_float(value: object) -> float:
 
 def _as_int(value: object) -> int:
     return int(_as_float(value))
-
-
-def _mb(value: object) -> float:
-    return round(_as_float(value) / 1_000_000, 3)
 
 
 def _append_positive(values: list[float], value: object) -> None:
@@ -1021,11 +846,3 @@ def _max(rows: list[MetricRow], field: str) -> float:
     if not rows:
         return 0.0
     return round(max(_as_float(row.get(field)) for row in rows), 3)
-
-
-def _column_letter(index: int) -> str:
-    letters = ""
-    while index:
-        index, remainder = divmod(index - 1, 26)
-        letters = chr(65 + remainder) + letters
-    return letters or "A"
