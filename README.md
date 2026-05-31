@@ -1,14 +1,21 @@
 # Secure Web Voice Intercom
 
-This is the browser-client version of the secure LAN voice intercom. Client machines do not need the Python project, a copied folder, or an executable. They only open the HTTPS URL served by the intercom server.
+This is the browser-client version of the secure voice intercom. Client machines do not need the Python project, a copied folder, or an executable. They only open the HTTPS URL served by the intercom server.
+
+The recommended deployment is defense in depth:
+
+- Tailscale protects the network layer and hides the server from the public LAN/internet.
+- WebRTC P2P carries browser-to-browser audio with DTLS/SRTP media encryption.
+- HTTPS/WSS remains available for signaling, room-key admission, metrics, and fallback relay mode.
 
 ## How It Works
 
 - The Python server serves a browser UI over HTTPS.
-- Browsers connect through WebSocket Secure (`wss://`).
-- Each browser captures microphone audio with `AudioWorklet`, requests a 16 kHz `AudioContext`, resamples captured frames to 16 kHz if the hardware forces a different rate, converts frames to PCM16, and sends them to the server.
-- Each browser keeps an independent playout clock per remote stream, so simultaneous talkers are mixed by the Web Audio graph instead of being serialized into one global queue.
-- The server relays each client's audio to the other clients in the same room, with bounded per-recipient queues and send timeouts so one slow browser does not stall the whole room.
+- Browsers connect through WebSocket Secure (`wss://`) for room admission, presence, QoS pings, metrics, and WebRTC signaling.
+- The default media mode is WebRTC P2P. Browsers exchange offers, answers, and ICE candidates through the Python server, then send audio directly browser-to-browser using WebRTC DTLS/SRTP.
+- The old WSS relay mode is still available from the UI as `WSS relay fallback`. In that mode, each browser captures microphone audio with `AudioWorklet`, requests a 16 kHz `AudioContext`, resamples captured frames to 16 kHz if the hardware forces a different rate, converts frames to PCM16, and sends them to the server.
+- In relay mode, each browser keeps an independent playout clock per remote stream, so simultaneous talkers are mixed by the Web Audio graph instead of being serialized into one global queue.
+- In relay mode, the server relays each client's audio to the other clients in the same room, with bounded per-recipient queues and send timeouts so one slow browser does not stall the whole room.
 - Transport security comes from HTTPS/WSS with TLS 1.2 or newer. A room key is required before a client can join.
 - The server limits total clients, open WebSocket connections, per-IP connections, and repeated failed room-key attempts.
 
@@ -52,6 +59,112 @@ https://192.168.3.202:8443
 
 Open the LAN URL on client machines using Chrome or Edge. The first visit will show a self-signed certificate warning. Continue to the site, then allow microphone access.
 
+## Recommended Internet Demo: Tailscale + WebRTC
+
+Use this when clients are in different locations over the internet. Ubuntu is the cleanest server target; Windows works well as a browser client.
+
+### 1. Install Tailscale on the Ubuntu server
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+tailscale status
+```
+
+In the Tailscale admin console, enable:
+
+- MagicDNS
+- HTTPS Certificates
+
+Then create the server certificate:
+
+```bash
+TS_HOSTNAME=$(tailscale status --json | python3 -c "import sys,json; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))")
+sudo tailscale cert "$TS_HOSTNAME"
+```
+
+Tailscale stores or writes a certificate pair named:
+
+```text
+<hostname>.crt
+<hostname>.key
+```
+
+The server searches the current directory, common Tailscale certificate directories, and `--tailscale-cert-dir` if provided. Keep the private key readable only by the server user. Do not make the key world-readable.
+
+If the certificate was created under `/var/lib/tailscale/certs` and your normal user cannot read the private key, copy it into a local protected folder instead of changing it to world-readable:
+
+```bash
+mkdir -p certs/tailscale
+sudo install -m 644 -o "$USER" -g "$USER" "/var/lib/tailscale/certs/$TS_HOSTNAME.crt" "certs/tailscale/$TS_HOSTNAME.crt"
+sudo install -m 600 -o "$USER" -g "$USER" "/var/lib/tailscale/certs/$TS_HOSTNAME.key" "certs/tailscale/$TS_HOSTNAME.key"
+```
+
+### 2. Run the intercom bound to the Tailscale IP
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+export WEB_INTERCOM_KEY="change-this-demo-secret"
+python -m web_intercom.server --tailscale --tailscale-cert-dir certs/tailscale --port 8443
+```
+
+If your cert files are in a custom directory:
+
+```bash
+python -m web_intercom.server --tailscale --tailscale-cert-dir /path/to/certs --port 8443
+```
+
+The server prints a URL like:
+
+```text
+https://server-name.tailxxxx.ts.net:8443
+```
+
+Only devices inside the tailnet should be able to reach it. The Python server binds to the Tailscale `100.x.y.z` address instead of `0.0.0.0`.
+
+### 3. Install Tailscale on each client
+
+Install Tailscale from `https://tailscale.com/download`, log in to the same tailnet, then open the printed `https://*.ts.net:8443` URL in Chrome or Edge.
+
+In the browser:
+
+1. Enter display name.
+2. Use the same room name, for example `main`.
+3. Enter the same room key.
+4. Keep media mode as `WebRTC P2P`.
+5. Click `Connect` and allow microphone access.
+
+If WebRTC cannot establish a P2P path in a specific network/browser combination, switch media mode to `WSS relay fallback`.
+
+### 4. Optional Tailscale ACL
+
+Restrict access so only approved client devices can reach the server port:
+
+If you use this ACL model, advertise tags after `tagOwners` is configured in the Tailscale admin console:
+
+```bash
+sudo tailscale up --advertise-tags=tag:intercom-server
+```
+
+```json
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["tag:intercom-client"],
+      "dst": ["tag:intercom-server:8443"]
+    }
+  ],
+  "tagOwners": {
+    "tag:intercom-server": ["autogroup:admin"],
+    "tag:intercom-client": ["autogroup:admin"]
+  }
+}
+```
+
 ## Room Key
 
 The room key is the shared password that clients must enter in the browser before they can join.
@@ -86,7 +199,8 @@ On each client machine:
 3. Enter a display name.
 4. Keep room as `main`, or choose the same room name as the other users.
 5. Enter the same room key configured on the server, for example `change-this-demo-secret`.
-6. Click `Connect`.
+6. Choose `WebRTC P2P` for direct encrypted browser media, or `WSS relay fallback` for the original PCM relay path.
+7. Click `Connect`.
 
 Use headphones to reduce echo.
 
@@ -133,7 +247,7 @@ Sequence gaps are reported as `network_loss_packets`, but only forward sequence 
 
 Presence messages include `active_stream_ids`, allowing browsers to remove state and scheduled audio nodes for streams that have left the room.
 
-For IEEE-style experiments, run the same scenario under controlled network conditions and compare results. Useful scenarios include normal LAN, added delay, added packet loss, and congested Wi-Fi. The current media path is WebSocket/TCP with PCM16; it is intentionally measurable but can accumulate delay under loss because TCP preserves ordering.
+For IEEE-style experiments, run the same scenario under controlled network conditions and compare results. Useful scenarios include normal LAN, added delay, added packet loss, congested Wi-Fi, Tailscale + WebRTC, and Tailscale + WSS relay fallback. The relay path is WebSocket/TCP with PCM16; it is intentionally measurable but can accumulate delay under loss because TCP preserves ordering.
 
 ## Firewall
 
@@ -145,25 +259,27 @@ New-NetFirewallRule -DisplayName "Secure Web Intercom HTTPS 8443" -Direction Inb
 
 ## Notes and Limitations
 
-- This version is for LAN demos, not public internet deployment.
+- LAN mode is for local demos. For internet/multi-site use, run behind Tailscale.
 - Browser microphone access requires HTTPS.
 - The generated certificate is self-signed, so clients must accept the browser warning once. The private key is written with restrictive file permissions where the operating system supports them.
+- In Tailscale mode, use a Tailscale HTTPS certificate for the `*.ts.net` hostname to avoid browser certificate warnings.
 - The HTTPS server enforces TLS 1.2 or newer.
 - The server rejects excess connections and rate-limits repeated failed room-key attempts per IP.
-- Audio is relayed by the server; the server can access the audio stream.
+- In WebRTC P2P mode, the server relays signaling only; browser media is protected by WebRTC DTLS/SRTP between peers. In WSS relay fallback mode, audio is relayed by the server and the server can access the audio stream.
 - Audio capture uses `AudioWorklet` instead of the deprecated `ScriptProcessorNode`, so capture work is isolated from the browser UI thread.
 - The client requests `AudioContext({ sampleRate: 16000 })`. If the actual `AudioContext.sampleRate` differs, captured audio is resampled to 16 kHz with `OfflineAudioContext` before transmission. Received PCM16 is placed in a 16 kHz `AudioBuffer` so the browser performs playback resampling instead of nearest-neighbor JavaScript scaling.
-- Audio packets carry stream ID, sequence number, and capture timestamp fields so browsers can measure jitter, late drops, buffer underruns, and callback stability.
+- Relay-mode audio packets carry stream ID, sequence number, and capture timestamp fields so browsers can measure jitter, late drops, buffer underruns, and callback stability.
 - Server relay sends are isolated per recipient with a bounded 4-packet relay queue and short send timeout. If a recipient queue is full, new packets for that recipient are dropped immediately instead of allowing hidden backlog growth. Presence updates are also sent with bounded concurrent writes so one slow browser cannot delay the whole room update.
-- Audio is still sent as uncompressed PCM16 over WebSocket/TCP. This is simple and measurable, but Wi-Fi loss or congestion can increase latency because TCP preserves order.
+- WSS relay fallback still sends audio as uncompressed PCM16 over WebSocket/TCP. This is simple and measurable, but Wi-Fi loss or congestion can increase latency because TCP preserves order.
+- Browser WebRTC host-candidate behavior can vary by browser and privacy settings. Tailscale makes direct routing possible, but keep the relay fallback for demos where a browser cannot establish a P2P ICE path.
 
 ## Roadmap
 
 Recommended next upgrades:
 
-1. Add browser-side Opus encoding with WebCodecs to reduce audio bandwidth from raw PCM16 toward speech-codec bitrates.
-2. Replace the WebSocket media path with WebRTC DataChannel in unordered/unreliable mode, using the Python server only for signaling.
-3. Add explicit one-way latency probes and jitter statistics to compare WebSocket/TCP against a WebRTC/UDP media path.
+1. Add richer WebRTC statistics export for packet loss, jitter, round-trip time, codec, and selected ICE candidate pair.
+2. Add optional TURN or controlled ICE-server configuration for environments where browser host candidates cannot connect over Tailscale.
+3. Compare Tailscale + WebRTC against Tailscale + WSS relay fallback under the same network conditions.
 
 ## Tests
 

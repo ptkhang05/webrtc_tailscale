@@ -59,6 +59,23 @@ h2 {
   word-break: break-all;
 }
 
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.badges span {
+  border: 1px solid #bdd3f6;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #eef5ff;
+  color: #1f4f94;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .status {
   min-width: 130px;
   text-align: center;
@@ -76,7 +93,7 @@ h2 {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto auto;
   gap: 12px;
   align-items: end;
 }
@@ -89,13 +106,15 @@ label {
   color: #3b4a5f;
 }
 
-input {
+input,
+select {
   width: 100%;
   height: 40px;
   border: 1px solid #c9d5e4;
   border-radius: 6px;
   padding: 0 10px;
   font-size: 15px;
+  background: #ffffff;
 }
 
 button {

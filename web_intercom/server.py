@@ -21,6 +21,7 @@ from aiohttp import WSMsgType, web
 
 from .certs import ensure_self_signed_cert, local_ipv4_addresses
 from .metrics import WebIntercomMetrics, write_metrics_workbook
+from .tailscale import discover_tailscale
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -146,7 +147,7 @@ class WebIntercomServer:
             await self.clear_auth_failures(remote_ip)
             self.start_relay_worker(client)
             self.metrics.record_join(client_id, name, room, joined_at)
-            await websocket.send_json({"type": "joined", "name": name, "room": room})
+            await websocket.send_json({"type": "joined", "client_id": client_id, "name": name, "room": room})
             await self.broadcast_presence(room)
             print(f"Joined {name} in room {room}")
 
@@ -313,8 +314,30 @@ class WebIntercomServer:
                 self.metrics.record_client_metrics(sender.client_id, metrics)
             else:
                 self.metrics.inc("invalid_messages")
+        elif payload.get("type") == "webrtc_signal":
+            await self.handle_webrtc_signal(sender, payload)
         else:
             self.metrics.inc("invalid_messages")
+
+    async def handle_webrtc_signal(self, sender: Client, payload: dict[str, object]) -> None:
+        target_client_id = str(payload.get("target_client_id") or "")
+        signal = payload.get("signal")
+        if not target_client_id or not isinstance(signal, dict):
+            self.metrics.inc("invalid_messages")
+            return
+        target = await self.client_by_id(target_client_id)
+        if target is None or target.room != sender.room:
+            self.metrics.inc("invalid_messages")
+            return
+        await self.send_control_json(
+            target,
+            {
+                "type": "webrtc_signal",
+                "from_client_id": sender.client_id,
+                "from_name": sender.name,
+                "signal": signal,
+            },
+        )
 
     async def room_recipients(
         self,
@@ -340,21 +363,33 @@ class WebIntercomServer:
                 if client.room == room and websocket is not exclude
             ]
 
+    async def client_by_id(self, client_id: str) -> Client | None:
+        async with self.lock:
+            for client in self.clients.values():
+                if client.client_id == client_id:
+                    return client
+        return None
+
     async def broadcast_presence(self, room: str) -> None:
         async with self.lock:
             clients = [client for client in self.clients.values() if client.room == room]
         names = sorted(client.name for client in clients)
+        peers = sorted(
+            [{"client_id": client.client_id, "name": client.name} for client in clients],
+            key=lambda item: str(item["client_id"]),
+        )
         active_stream_ids = sorted({stream_id for client in clients for stream_id in client.stream_ids})
         message = {
             "type": "presence",
             "room": room,
             "count": len(names),
             "clients": names,
+            "peers": peers,
             "active_stream_ids": active_stream_ids,
         }
-        await asyncio.gather(*(self.send_presence(client, message) for client in clients))
+        await asyncio.gather(*(self.send_control_json(client, message) for client in clients))
 
-    async def send_presence(self, client: Client, message: dict[str, object]) -> None:
+    async def send_control_json(self, client: Client, message: dict[str, object]) -> None:
         try:
             async with asyncio.timeout(PRESENCE_SEND_TIMEOUT_SECONDS):
                 await client.websocket.send_json(message)
@@ -490,6 +525,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="HTTPS port. Default: %(default)s")
     parser.add_argument("--key", help="Room key. Defaults to WEB_INTERCOM_KEY or secure prompt.")
     parser.add_argument("--cert-dir", default="certs", help="Directory for generated self-signed HTTPS certificate.")
+    parser.add_argument(
+        "--tailscale",
+        action="store_true",
+        help="Bind to this machine's Tailscale IPv4 address and use its Tailscale HTTPS certificate.",
+    )
+    parser.add_argument(
+        "--tailscale-cert-dir",
+        help="Directory containing <tailscale-hostname>.crt and <tailscale-hostname>.key. Defaults to common Tailscale locations.",
+    )
     parser.add_argument("--stats-interval", type=float, default=5.0, help="Print server stats every N seconds.")
     parser.add_argument(
         "--metrics-xlsx",
@@ -535,8 +579,26 @@ def main(argv: Iterable[str] | None = None) -> int:
     room_key = load_room_key(args.key)
     project_dir = Path(__file__).resolve().parents[1]
     static_dir = project_dir / "static"
-    cert_hosts = ["localhost", *local_ipv4_addresses()]
-    cert_path, key_path = ensure_self_signed_cert(project_dir / args.cert_dir, cert_hosts)
+    host = args.host
+    display_urls: list[str]
+    using_tailscale = False
+    if args.tailscale:
+        tailscale_config = discover_tailscale(args.tailscale_cert_dir, require_cert=True)
+        host = tailscale_config.ip
+        cert_path = tailscale_config.cert_path
+        key_path = tailscale_config.key_path
+        if cert_path is None or key_path is None:
+            raise RuntimeError("Tailscale certificate discovery returned no certificate paths")
+        display_urls = [f"https://{tailscale_config.hostname}:{args.port}"]
+        using_tailscale = True
+        print("[tailscale] Hostname :", tailscale_config.hostname)
+        print("[tailscale] Bind IP  :", tailscale_config.ip)
+        print("[tailscale] Cert     :", cert_path)
+    else:
+        cert_hosts = ["localhost", *local_ipv4_addresses()]
+        cert_path, key_path = ensure_self_signed_cert(project_dir / args.cert_dir, cert_hosts)
+        display_urls = [f"https://localhost:{args.port}"]
+        display_urls.extend(f"https://{address}:{args.port}" for address in local_ipv4_addresses() if not address.startswith("127."))
 
     ssl_context = build_ssl_context(cert_path, key_path)
     app = create_app(
@@ -551,13 +613,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         auth_failure_window_seconds=args.auth_failure_window,
     )
 
-    urls = [f"https://localhost:{args.port}"]
-    urls.extend(f"https://{address}:{args.port}" for address in local_ipv4_addresses() if not address.startswith("127."))
     print("Open this URL on client browsers:")
-    for url in urls:
+    for url in display_urls:
         print(f"  {url}")
-    print("The first browser visit will show a self-signed certificate warning. Continue to the site.")
-    web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
+    if using_tailscale:
+        print("Tailscale mode enabled: server is bound to the tailnet IP only.")
+        print("WebRTC P2P mode is available in the browser; WSS relay remains as a fallback.")
+    else:
+        print("The first browser visit will show a self-signed certificate warning. Continue to the site.")
+    web.run_app(app, host=host, port=args.port, ssl_context=ssl_context)
     return 0
 
 

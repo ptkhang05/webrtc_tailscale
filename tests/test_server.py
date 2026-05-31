@@ -23,6 +23,7 @@ from web_intercom.server import (
     create_app,
     load_room_key,
 )
+from web_intercom.tailscale import find_tailscale_cert
 
 
 def test_parser_defaults():
@@ -32,6 +33,8 @@ def test_parser_defaults():
     assert args.port == 8443
     assert args.stats_interval == 5.0
     assert args.metrics_xlsx is None
+    assert args.tailscale is False
+    assert args.tailscale_cert_dir is None
     assert args.max_clients == MAX_CLIENTS
     assert args.max_open_connections == MAX_OPEN_CONNECTIONS
     assert args.max_connections_per_ip == MAX_CONNECTIONS_PER_IP
@@ -300,6 +303,10 @@ def test_broadcast_presence_skips_broken_client():
                 "room": "main",
                 "count": 2,
                 "clients": ["bad", "good"],
+                "peers": [
+                    {"client_id": "client-0001", "name": "bad"},
+                    {"client_id": "client-0002", "name": "good"},
+                ],
                 "active_stream_ids": [],
             }
         ]
@@ -354,8 +361,61 @@ def test_broadcast_presence_includes_active_stream_ids():
         await relay.broadcast_presence("main")
 
         assert websocket.messages[-1]["active_stream_ids"] == [7, 99]
+        assert websocket.messages[-1]["peers"] == [{"client_id": "client-0001", "name": "alice"}]
 
     asyncio.run(run())
+
+
+def test_webrtc_signaling_relays_only_within_room():
+    class WebSocket:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def send_json(self, message: dict) -> None:
+            self.messages.append(message)
+
+    async def run() -> None:
+        relay = WebIntercomServer("secret")
+        sender_ws = WebSocket()
+        target_ws = WebSocket()
+        other_room_ws = WebSocket()
+        sender = Client(sender_ws, "client-0001", "alice", "main", time.monotonic())
+        target = Client(target_ws, "client-0002", "bob", "main", time.monotonic())
+        other_room = Client(other_room_ws, "client-0003", "eve", "other", time.monotonic())
+        relay.clients[sender_ws] = sender
+        relay.clients[target_ws] = target
+        relay.clients[other_room_ws] = other_room
+
+        await relay.handle_text(
+            sender,
+            '{"type":"webrtc_signal","target_client_id":"client-0002","signal":{"kind":"offer","description":{"type":"offer","sdp":"x"}}}',
+        )
+        await relay.handle_text(
+            sender,
+            '{"type":"webrtc_signal","target_client_id":"client-0003","signal":{"kind":"offer"}}',
+        )
+
+        assert target_ws.messages == [
+            {
+                "type": "webrtc_signal",
+                "from_client_id": "client-0001",
+                "from_name": "alice",
+                "signal": {"kind": "offer", "description": {"type": "offer", "sdp": "x"}},
+            }
+        ]
+        sample = relay.metrics.sample([])
+        assert sample["invalid_messages"] == 1
+
+    asyncio.run(run())
+
+
+def test_find_tailscale_cert_prefers_explicit_directory(tmp_path):
+    cert = tmp_path / "server.tail.ts.net.crt"
+    key = tmp_path / "server.tail.ts.net.key"
+    cert.write_text("cert", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+
+    assert find_tailscale_cert("server.tail.ts.net", tmp_path) == (cert, key)
 
 
 def test_e_model_degrades_with_delay_and_late_drop():

@@ -13,6 +13,11 @@
           <div>
             <h1>Secure Web Intercom</h1>
             <p id="endpoint"></p>
+            <div class="badges">
+              <span>Tailnet-ready</span>
+              <span>WebRTC P2P media</span>
+              <span>WSS relay fallback</span>
+            </div>
           </div>
           <div class="status" id="status">Disconnected</div>
         </div>
@@ -29,6 +34,13 @@
           <label>
             Room key
             <input id="key" name="key" type="password" required placeholder="shared key" />
+          </label>
+          <label>
+            Media
+            <select id="media-mode" name="media-mode">
+              <option value="webrtc" selected>WebRTC P2P</option>
+              <option value="relay">WSS relay fallback</option>
+            </select>
           </label>
           <button id="join-button" type="submit">Connect</button>
           <button id="leave-button" type="button" disabled>Disconnect</button>

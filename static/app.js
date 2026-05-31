@@ -6,6 +6,8 @@ const TALK_BURST_RESET_SECONDS = 0.1;
 const MAX_PLAYBACK_QUEUE_SECONDS = 0.5;
 const QOS_PING_INTERVAL_MS = 2000;
 const MAX_PENDING_CAPTURE_SENDS = 8;
+const MEDIA_MODE_WEBRTC = "webrtc";
+const MEDIA_MODE_RELAY = "relay";
 
 const form = document.querySelector("#join-form");
 const leaveButton = document.querySelector("#leave-button");
@@ -17,6 +19,7 @@ const clientListEl = document.querySelector("#client-list");
 const sentRateEl = document.querySelector("#sent-rate");
 const rxRateEl = document.querySelector("#rx-rate");
 const packetCountEl = document.querySelector("#packet-count");
+const mediaModeEl = document.querySelector("#media-mode");
 
 let socket = null;
 let audioContext = null;
@@ -28,6 +31,10 @@ let qosPingTimer = null;
 let streamId = createStreamId();
 let sequence = 0;
 let remoteStreams = new Map();
+let peerConnections = new Map();
+let remoteAudioElements = new Map();
+let selfClientId = null;
+let mediaMode = MEDIA_MODE_WEBRTC;
 let workletCallbackStats = createStats();
 let workletMessageStats = createStats();
 let lastWorkletMessageAtMs = null;
@@ -114,6 +121,9 @@ leaveButton.addEventListener("click", () => {
 });
 
 setInterval(() => {
+  if (mediaMode === MEDIA_MODE_WEBRTC && socket) {
+    updateWebRtcStats().catch(() => {});
+  }
   const sentDelta = metrics.sentBytes - metrics.lastSentBytes;
   const rxDelta = metrics.receivedBytes - metrics.lastReceivedBytes;
   metrics.lastSentBytes = metrics.sentBytes;
@@ -134,40 +144,23 @@ async function connect() {
     return;
   }
 
-  metrics = createMetrics();
-  streamId = createStreamId();
-  sequence = 0;
-  remoteStreams = new Map();
-  workletCallbackStats = createStats();
-  workletMessageStats = createStats();
-  lastWorkletMessageAtMs = null;
-  captureSendChain = Promise.resolve();
-  pendingCaptureSends = 0;
-  captureSessionId += 1;
+  resetRuntimeState();
+  mediaMode = mediaModeEl ? mediaModeEl.value : MEDIA_MODE_WEBRTC;
   setStatus("Connecting", false);
   try {
-    audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
-    metrics.audioContextSampleRate = audioContext.sampleRate;
-    if (audioContext.audioWorklet === undefined) {
-      metrics.captureErrors += 1;
-      setStatus("AudioWorklet unavailable", false);
-      throw new Error("AudioWorklet is not supported by this browser.");
-    }
-    await audioContext.audioWorklet.addModule("/static/audio-worklet.js");
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        noiseSuppression: true,
+        echoCancellation: true,
+        autoGainControl: true,
+      },
+    });
 
-    try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          noiseSuppression: true,
-          echoCancellation: true,
-          autoGainControl: true,
-        },
-      });
-    } catch (error) {
-      metrics.captureErrors += 1;
-      setStatus("Microphone blocked", false);
-      throw error;
+    if (mediaMode === MEDIA_MODE_RELAY) {
+      await setupRelayAudioContext();
+    } else if (typeof RTCPeerConnection !== "function") {
+      throw new Error("WebRTC is not supported by this browser.");
     }
 
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -180,6 +173,7 @@ async function connect() {
         name: document.querySelector("#name").value,
         room: document.querySelector("#room").value,
         key: document.querySelector("#key").value,
+        media_mode: mediaMode,
       };
       socket.send(JSON.stringify(payload));
     });
@@ -189,17 +183,9 @@ async function connect() {
         handleControlMessage(JSON.parse(event.data));
         return;
       }
-      metrics.receivedBytes += event.data.byteLength;
-      const packet = parseAudioPacket(event.data);
-      if (!packet) {
-        metrics.malformedAudioPackets += 1;
-        return;
+      if (mediaMode === MEDIA_MODE_RELAY) {
+        handleRelayAudioPacket(event.data);
       }
-      metrics.receivedPayloadBytes += packet.payload.byteLength;
-      metrics.receivedPackets += 1;
-      metrics.packets += 1;
-      updateRfc3550Jitter(packet);
-      playPcm16(packet);
     });
 
     socket.addEventListener("close", () => {
@@ -211,11 +197,52 @@ async function connect() {
     });
   } catch (error) {
     cleanupFailedConnect();
+    setStatus(error.message || "Connection failed", false);
     throw error;
   }
 }
 
-function startAudioCapture() {
+function resetRuntimeState() {
+  metrics = createMetrics();
+  streamId = createStreamId();
+  sequence = 0;
+  remoteStreams = new Map();
+  peerConnections = new Map();
+  remoteAudioElements = new Map();
+  selfClientId = null;
+  workletCallbackStats = createStats();
+  workletMessageStats = createStats();
+  lastWorkletMessageAtMs = null;
+  captureSendChain = Promise.resolve();
+  pendingCaptureSends = 0;
+  captureSessionId += 1;
+}
+
+async function setupRelayAudioContext() {
+  audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+  metrics.audioContextSampleRate = audioContext.sampleRate;
+  if (audioContext.audioWorklet === undefined) {
+    metrics.captureErrors += 1;
+    throw new Error("AudioWorklet is not supported by this browser.");
+  }
+  await audioContext.audioWorklet.addModule("/static/audio-worklet.js");
+}
+
+function handleRelayAudioPacket(arrayBuffer) {
+  metrics.receivedBytes += arrayBuffer.byteLength;
+  const packet = parseAudioPacket(arrayBuffer);
+  if (!packet) {
+    metrics.malformedAudioPackets += 1;
+    return;
+  }
+  metrics.receivedPayloadBytes += packet.payload.byteLength;
+  metrics.receivedPackets += 1;
+  metrics.packets += 1;
+  updateRfc3550Jitter(packet);
+  playPcm16(packet);
+}
+
+function startRelayAudioCapture() {
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   workletNode = new AudioWorkletNode(audioContext, "intercom-capture-processor", {
     numberOfInputs: 1,
@@ -256,11 +283,14 @@ function startAudioCapture() {
 
 function handleControlMessage(message) {
   if (message.type === "joined") {
-    startAudioCapture();
+    selfClientId = message.client_id || null;
+    if (mediaMode === MEDIA_MODE_RELAY) {
+      startRelayAudioCapture();
+    }
     startQosProbes();
     joinButton.disabled = true;
     leaveButton.disabled = false;
-    setStatus("Connected", true);
+    setStatus(mediaMode === MEDIA_MODE_WEBRTC ? "Connected (WebRTC)" : "Connected (WSS relay)", true);
     return;
   }
   if (message.type === "qos_pong") {
@@ -274,12 +304,25 @@ function handleControlMessage(message) {
   if (message.type === "presence") {
     clientCountEl.textContent = String(message.count);
     clientListEl.innerHTML = "";
-    for (const name of message.clients) {
+    const names = Array.isArray(message.clients) ? message.clients : [];
+    for (const name of names) {
       const item = document.createElement("li");
       item.textContent = name;
       clientListEl.appendChild(item);
     }
-    reconcileRemoteStreams(message.active_stream_ids);
+    if (mediaMode === MEDIA_MODE_WEBRTC) {
+      reconcileWebRtcPeers(message.peers).catch((error) => {
+        console.error("WebRTC peer reconciliation failed", error);
+      });
+    } else {
+      reconcileRemoteStreams(message.active_stream_ids);
+    }
+    return;
+  }
+  if (message.type === "webrtc_signal") {
+    handleWebRtcSignal(message).catch((error) => {
+      console.error("WebRTC signaling failed", error);
+    });
     return;
   }
   if (message.type === "error") {
@@ -307,41 +350,206 @@ function sendQosPing() {
   );
 }
 
-function cleanupFailedConnect() {
-  if (socket) {
-    socket.close();
-    socket = null;
+async function reconcileWebRtcPeers(peers) {
+  if (!Array.isArray(peers) || !selfClientId || !mediaStream) {
+    return;
   }
-  if (workletNode) {
-    workletNode.port.onmessage = null;
-    workletNode.disconnect();
-    workletNode = null;
-  }
-  if (silenceGainNode) {
-    silenceGainNode.disconnect();
-    silenceGainNode = null;
-  }
-  if (sourceNode) {
-    sourceNode.disconnect();
-    sourceNode = null;
-  }
-  if (mediaStream) {
-    for (const track of mediaStream.getTracks()) {
-      track.stop();
+  const activePeerIds = new Set(
+    peers
+      .map((peer) => String(peer.client_id || ""))
+      .filter((peerId) => peerId && peerId !== selfClientId),
+  );
+  for (const peerId of peerConnections.keys()) {
+    if (!activePeerIds.has(peerId)) {
+      closePeerConnection(peerId);
     }
-    mediaStream = null;
   }
-  for (const state of remoteStreams.values()) {
-    stopActiveNodes(state);
+  for (const peer of peers) {
+    const peerId = String(peer.client_id || "");
+    if (!peerId || peerId === selfClientId || peerConnections.has(peerId)) {
+      continue;
+    }
+    createPeerConnection(peerId, String(peer.name || peerId));
+    if (selfClientId < peerId) {
+      await sendOffer(peerId);
+    }
   }
-  if (audioContext) {
-    audioContext.close();
-    audioContext = null;
+}
+
+function createPeerConnection(peerId, peerName) {
+  const peerConnection = new RTCPeerConnection({ iceServers: [] });
+  const state = {
+    peerId,
+    peerName,
+    peerConnection,
+  };
+  peerConnections.set(peerId, state);
+
+  for (const track of mediaStream.getTracks()) {
+    peerConnection.addTrack(track, mediaStream);
   }
-  captureSendChain = Promise.resolve();
-  pendingCaptureSends = 0;
-  captureSessionId += 1;
-  remoteStreams = new Map();
+
+  peerConnection.onicecandidate = (event) => {
+    if (event.candidate) {
+      sendWebRtcSignal(peerId, {
+        kind: "ice",
+        candidate: iceCandidateToJson(event.candidate),
+      });
+    }
+  };
+
+  peerConnection.ontrack = (event) => {
+    const [stream] = event.streams;
+    if (stream) {
+      attachRemoteAudio(peerId, stream);
+    }
+  };
+
+  peerConnection.onconnectionstatechange = () => {
+    const stateName = peerConnection.connectionState;
+    if (stateName === "failed" || stateName === "closed" || stateName === "disconnected") {
+      closePeerConnection(peerId);
+    }
+  };
+
+  return state;
+}
+
+async function sendOffer(peerId) {
+  const state = peerConnections.get(peerId);
+  if (!state) {
+    return;
+  }
+  const offer = await state.peerConnection.createOffer({
+    offerToReceiveAudio: true,
+  });
+  await state.peerConnection.setLocalDescription(offer);
+  sendWebRtcSignal(peerId, {
+    kind: "offer",
+    description: sessionDescriptionToJson(state.peerConnection.localDescription),
+  });
+}
+
+async function handleWebRtcSignal(message) {
+  if (mediaMode !== MEDIA_MODE_WEBRTC || !mediaStream) {
+    return;
+  }
+  const peerId = String(message.from_client_id || "");
+  const signal = message.signal || {};
+  if (!peerId || peerId === selfClientId) {
+    return;
+  }
+  let state = peerConnections.get(peerId);
+  if (!state) {
+    state = createPeerConnection(peerId, String(message.from_name || peerId));
+  }
+  const peerConnection = state.peerConnection;
+  if (signal.kind === "offer" && signal.description) {
+    await peerConnection.setRemoteDescription(signal.description);
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    sendWebRtcSignal(peerId, {
+      kind: "answer",
+      description: sessionDescriptionToJson(peerConnection.localDescription),
+    });
+  } else if (signal.kind === "answer" && signal.description) {
+    await peerConnection.setRemoteDescription(signal.description);
+  } else if (signal.kind === "ice" && signal.candidate) {
+    try {
+      await peerConnection.addIceCandidate(signal.candidate);
+    } catch (error) {
+      console.warn("Ignoring ICE candidate that could not be added", error);
+    }
+  }
+}
+
+function sessionDescriptionToJson(description) {
+  return {
+    type: description.type,
+    sdp: description.sdp,
+  };
+}
+
+function iceCandidateToJson(candidate) {
+  return {
+    candidate: candidate.candidate,
+    sdpMid: candidate.sdpMid,
+    sdpMLineIndex: candidate.sdpMLineIndex,
+    usernameFragment: candidate.usernameFragment,
+  };
+}
+
+function sendWebRtcSignal(peerId, signal) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  socket.send(
+    JSON.stringify({
+      type: "webrtc_signal",
+      target_client_id: peerId,
+      signal,
+    }),
+  );
+}
+
+function attachRemoteAudio(peerId, stream) {
+  let audio = remoteAudioElements.get(peerId);
+  if (!audio) {
+    audio = document.createElement("audio");
+    audio.autoplay = true;
+    audio.playsInline = true;
+    audio.dataset.peerId = peerId;
+    audio.style.display = "none";
+    document.body.appendChild(audio);
+    remoteAudioElements.set(peerId, audio);
+  }
+  audio.srcObject = stream;
+  audio.play().catch(() => {});
+}
+
+function closePeerConnection(peerId) {
+  const state = peerConnections.get(peerId);
+  if (state) {
+    state.peerConnection.close();
+    peerConnections.delete(peerId);
+  }
+  const audio = remoteAudioElements.get(peerId);
+  if (audio) {
+    audio.srcObject = null;
+    audio.remove();
+    remoteAudioElements.delete(peerId);
+  }
+}
+
+async function updateWebRtcStats() {
+  let sentBytes = 0;
+  let receivedBytes = 0;
+  let sentPackets = 0;
+  let receivedPackets = 0;
+  for (const state of peerConnections.values()) {
+    const report = await state.peerConnection.getStats();
+    for (const item of report.values()) {
+      if (item.type === "outbound-rtp" && item.kind === "audio") {
+        sentBytes += Number(item.bytesSent || 0);
+        sentPackets += Number(item.packetsSent || 0);
+      } else if (item.type === "inbound-rtp" && item.kind === "audio") {
+        receivedBytes += Number(item.bytesReceived || 0);
+        receivedPackets += Number(item.packetsReceived || 0);
+      }
+    }
+  }
+  metrics.sentBytes = sentBytes;
+  metrics.sentPayloadBytes = sentBytes;
+  metrics.sentPackets = sentPackets;
+  metrics.receivedBytes = receivedBytes;
+  metrics.receivedPayloadBytes = receivedBytes;
+  metrics.receivedPackets = receivedPackets;
+  metrics.playedPackets = receivedPackets;
+  metrics.packets = sentPackets + receivedPackets;
+}
+
+function cleanupFailedConnect() {
+  cleanupMediaAndPeers();
   joinButton.disabled = false;
   leaveButton.disabled = true;
 }
@@ -355,7 +563,16 @@ function disconnect(closeSocket = true) {
     clearInterval(qosPingTimer);
     qosPingTimer = null;
   }
+  cleanupMediaAndPeers();
+  joinButton.disabled = false;
+  leaveButton.disabled = true;
+  setStatus("Disconnected", false);
+}
 
+function cleanupMediaAndPeers() {
+  for (const peerId of Array.from(peerConnections.keys())) {
+    closePeerConnection(peerId);
+  }
   if (workletNode) {
     workletNode.port.onmessage = null;
     workletNode.disconnect();
@@ -386,9 +603,7 @@ function disconnect(closeSocket = true) {
   pendingCaptureSends = 0;
   captureSessionId += 1;
   remoteStreams = new Map();
-  joinButton.disabled = false;
-  leaveButton.disabled = true;
-  setStatus("Disconnected", false);
+  selfClientId = null;
 }
 
 function buildAudioPacket(payloadBuffer, captureTimeMs) {
@@ -447,27 +662,27 @@ function updateRfc3550Jitter(packet) {
   );
 }
 
-function updateSequenceTracking(state, sequence) {
+function updateSequenceTracking(state, sequenceValue) {
   if (state.lastSequence !== null) {
     const expected = (state.lastSequence + 1) >>> 0;
-    if (sequence === expected) {
-      state.lastSequence = sequence;
+    if (sequenceValue === expected) {
+      state.lastSequence = sequenceValue;
       return true;
     }
-    const forwardGap = (sequence - expected) >>> 0;
+    const forwardGap = (sequenceValue - expected) >>> 0;
     if (forwardGap > 0 && forwardGap < 0x80000000) {
       metrics.networkLossPackets += forwardGap;
-      state.lastSequence = sequence;
+      state.lastSequence = sequenceValue;
       return true;
     }
     return false;
   }
-  state.lastSequence = sequence;
+  state.lastSequence = sequenceValue;
   return true;
 }
 
-function getRemoteStreamState(streamId) {
-  let state = remoteStreams.get(streamId);
+function getRemoteStreamState(remoteStreamId) {
+  let state = remoteStreams.get(remoteStreamId);
   if (!state) {
     state = {
       previousTransitMs: null,
@@ -476,7 +691,7 @@ function getRemoteStreamState(streamId) {
       nextPlaybackTime: 0,
       activeNodes: [],
     };
-    remoteStreams.set(streamId, state);
+    remoteStreams.set(remoteStreamId, state);
   }
   return state;
 }
@@ -586,7 +801,7 @@ function sendBrowserMetrics() {
         audio_context_sample_rate: metrics.audioContextSampleRate,
         resampled_frames: metrics.resampledFrames,
         capture_queue_dropped_frames: metrics.captureQueueDroppedFrames,
-        active_remote_streams: remoteStreams.size,
+        active_remote_streams: mediaMode === MEDIA_MODE_WEBRTC ? peerConnections.size : remoteStreams.size,
         last_sent_kbps: Number(metrics.lastSentKbps.toFixed(3)),
         last_rx_kbps: Number(metrics.lastRxKbps.toFixed(3)),
         playback_queue_seconds: Number(playbackQueueSeconds.toFixed(3)),
