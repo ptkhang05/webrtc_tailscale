@@ -25,8 +25,8 @@ The recommended deployment is defense in depth:
 Install Python 3.12, then clone the project and install the Python dependencies:
 
 ```powershell
-git clone https://github.com/Khang2kruoi/secure-web-intercom.git
-cd secure-web-intercom
+git clone https://github.com/ptkhang05/webrtc_tailscale.git
+cd webrtc_tailscale
 python -m pip install -r requirements.txt
 ```
 
@@ -116,8 +116,8 @@ Keep the `.key` file private. Do not upload `certs\` to GitHub.
 ### 3. Install the intercom project on the Windows 11 server
 
 ```powershell
-git clone https://github.com/Khang2kruoi/secure-web-intercom.git
-cd secure-web-intercom
+git clone https://github.com/ptkhang05/webrtc_tailscale.git
+cd webrtc_tailscale
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
