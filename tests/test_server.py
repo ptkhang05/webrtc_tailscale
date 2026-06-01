@@ -308,6 +308,7 @@ def test_broadcast_presence_skips_broken_client():
                     {"client_id": "client-0002", "name": "good"},
                 ],
                 "active_stream_ids": [],
+                "active_streams": [],
             }
         ]
 
@@ -361,6 +362,10 @@ def test_broadcast_presence_includes_active_stream_ids():
         await relay.broadcast_presence("main")
 
         assert websocket.messages[-1]["active_stream_ids"] == [7, 99]
+        assert websocket.messages[-1]["active_streams"] == [
+            {"stream_id": 7, "client_id": "client-0001", "name": "alice"},
+            {"stream_id": 99, "client_id": "client-0001", "name": "alice"},
+        ]
         assert websocket.messages[-1]["peers"] == [{"client_id": "client-0001", "name": "alice"}]
 
     asyncio.run(run())

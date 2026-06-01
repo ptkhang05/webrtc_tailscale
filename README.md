@@ -16,6 +16,7 @@ The recommended deployment is defense in depth:
 - The old WSS relay mode is still available from the UI as `WSS relay fallback`. In that mode, each browser captures microphone audio with `AudioWorklet`, requests a 16 kHz `AudioContext`, resamples captured frames to 16 kHz if the hardware forces a different rate, converts frames to PCM16, and sends them to the server.
 - In relay mode, each browser keeps an independent playout clock per remote stream, so simultaneous talkers are mixed by the Web Audio graph instead of being serialized into one global queue.
 - In relay mode, the server relays each client's audio to the other clients in the same room, with bounded per-recipient queues and send timeouts so one slow browser does not stall the whole room.
+- The online client list shows an active-speaker indicator: gray when a participant is silent and pulsing red when that participant is currently speaking.
 - Transport security comes from HTTPS/WSS with TLS 1.2 or newer. A room key is required before a client can join.
 - The server limits total clients, open WebSocket connections, per-IP connections, and repeated failed room-key attempts.
 

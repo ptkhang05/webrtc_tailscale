@@ -379,6 +379,14 @@ class WebIntercomServer:
             key=lambda item: str(item["client_id"]),
         )
         active_stream_ids = sorted({stream_id for client in clients for stream_id in client.stream_ids})
+        active_streams = sorted(
+            [
+                {"stream_id": stream_id, "client_id": client.client_id, "name": client.name}
+                for client in clients
+                for stream_id in client.stream_ids
+            ],
+            key=lambda item: (int(item["stream_id"]), str(item["client_id"])),
+        )
         message = {
             "type": "presence",
             "room": room,
@@ -386,6 +394,7 @@ class WebIntercomServer:
             "clients": names,
             "peers": peers,
             "active_stream_ids": active_stream_ids,
+            "active_streams": active_streams,
         }
         await asyncio.gather(*(self.send_control_json(client, message) for client in clients))
 

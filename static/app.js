@@ -8,6 +8,9 @@ const QOS_PING_INTERVAL_MS = 2000;
 const MAX_PENDING_CAPTURE_SENDS = 8;
 const MEDIA_MODE_WEBRTC = "webrtc";
 const MEDIA_MODE_RELAY = "relay";
+const SPEAKING_RMS_THRESHOLD = 0.035;
+const SPEAKING_HOLD_MS = 450;
+const SPEAKER_METER_INTERVAL_MS = 80;
 
 const form = document.querySelector("#join-form");
 const leaveButton = document.querySelector("#leave-button");
@@ -33,6 +36,10 @@ let sequence = 0;
 let remoteStreams = new Map();
 let peerConnections = new Map();
 let remoteAudioElements = new Map();
+let speakerStates = new Map();
+let speakerMeters = new Map();
+let streamOwners = new Map();
+let speakerMeterContext = null;
 let selfClientId = null;
 let mediaMode = MEDIA_MODE_WEBRTC;
 let workletCallbackStats = createStats();
@@ -139,6 +146,10 @@ setInterval(() => {
   sendBrowserMetrics();
 }, 5000);
 
+setInterval(() => {
+  refreshSpeakingIndicators();
+}, SPEAKER_METER_INTERVAL_MS);
+
 async function connect() {
   if (socket) {
     return;
@@ -156,6 +167,7 @@ async function connect() {
         autoGainControl: true,
       },
     });
+    setupStreamSpeakerMeter("local", mediaStream, () => selfClientId);
 
     if (mediaMode === MEDIA_MODE_RELAY) {
       await setupRelayAudioContext();
@@ -209,6 +221,9 @@ function resetRuntimeState() {
   remoteStreams = new Map();
   peerConnections = new Map();
   remoteAudioElements = new Map();
+  speakerStates = new Map();
+  speakerMeters = new Map();
+  streamOwners = new Map();
   selfClientId = null;
   workletCallbackStats = createStats();
   workletMessageStats = createStats();
@@ -303,13 +318,8 @@ function handleControlMessage(message) {
   }
   if (message.type === "presence") {
     clientCountEl.textContent = String(message.count);
-    clientListEl.innerHTML = "";
-    const names = Array.isArray(message.clients) ? message.clients : [];
-    for (const name of names) {
-      const item = document.createElement("li");
-      item.textContent = name;
-      clientListEl.appendChild(item);
-    }
+    renderClientList(message);
+    updateRelayStreamOwners(message.active_streams);
     if (mediaMode === MEDIA_MODE_WEBRTC) {
       reconcileWebRtcPeers(message.peers).catch((error) => {
         console.error("WebRTC peer reconciliation failed", error);
@@ -504,6 +514,7 @@ function attachRemoteAudio(peerId, stream) {
     remoteAudioElements.set(peerId, audio);
   }
   audio.srcObject = stream;
+  setupStreamSpeakerMeter(`peer:${peerId}`, stream, () => peerId);
   audio.play().catch(() => {});
 }
 
@@ -519,6 +530,7 @@ function closePeerConnection(peerId) {
     audio.remove();
     remoteAudioElements.delete(peerId);
   }
+  removeSpeakerMeter(`peer:${peerId}`);
 }
 
 async function updateWebRtcStats() {
@@ -592,6 +604,7 @@ function cleanupMediaAndPeers() {
     }
     mediaStream = null;
   }
+  cleanupSpeakerMeters();
   for (const state of remoteStreams.values()) {
     stopActiveNodes(state);
   }
@@ -603,6 +616,10 @@ function cleanupMediaAndPeers() {
   pendingCaptureSends = 0;
   captureSessionId += 1;
   remoteStreams = new Map();
+  streamOwners = new Map();
+  speakerStates = new Map();
+  clientListEl.innerHTML = "";
+  clientCountEl.textContent = "0";
   selfClientId = null;
 }
 
@@ -696,6 +713,217 @@ function getRemoteStreamState(remoteStreamId) {
   return state;
 }
 
+function renderClientList(message) {
+  const peers = Array.isArray(message.peers) ? message.peers : [];
+  const names = Array.isArray(message.clients) ? message.clients : [];
+  const now = performance.now();
+  const activeClientIds = new Set();
+  clientListEl.innerHTML = "";
+
+  if (peers.length > 0) {
+    for (const peer of peers) {
+      const clientId = String(peer.client_id || "");
+      if (!clientId) {
+        continue;
+      }
+      activeClientIds.add(clientId);
+      const name = String(peer.name || clientId);
+      const speaker = ensureSpeakerState(clientId, name, clientId === selfClientId);
+      clientListEl.appendChild(createClientListItem(speaker, now));
+    }
+  } else {
+    for (const name of names) {
+      const clientId = `name:${name}`;
+      activeClientIds.add(clientId);
+      const speaker = ensureSpeakerState(clientId, String(name), false);
+      clientListEl.appendChild(createClientListItem(speaker, now));
+    }
+  }
+
+  for (const clientId of Array.from(speakerStates.keys())) {
+    if (!activeClientIds.has(clientId)) {
+      speakerStates.delete(clientId);
+    }
+  }
+}
+
+function createClientListItem(speaker, now) {
+  const item = document.createElement("li");
+  item.className = "client-chip";
+  item.dataset.clientId = speaker.clientId;
+
+  const indicator = document.createElement("span");
+  indicator.className = "talk-indicator";
+  indicator.setAttribute("aria-hidden", "true");
+
+  const label = document.createElement("span");
+  label.className = "client-name";
+  label.textContent = speaker.isSelf ? `${speaker.name} (you)` : speaker.name;
+
+  item.appendChild(indicator);
+  item.appendChild(label);
+  speaker.itemEl = item;
+  speaker.indicatorEl = indicator;
+  updateSpeakerIndicator(speaker, now);
+  return item;
+}
+
+function ensureSpeakerState(clientId, name, isSelf) {
+  let state = speakerStates.get(clientId);
+  if (!state) {
+    state = {
+      clientId,
+      name,
+      isSelf,
+      lastSpokeAtMs: 0,
+      itemEl: null,
+      indicatorEl: null,
+    };
+    speakerStates.set(clientId, state);
+  }
+  state.name = name || state.name;
+  state.isSelf = Boolean(isSelf);
+  return state;
+}
+
+function updateSpeakerIndicator(speaker, now) {
+  const isSpeaking = speaker.lastSpokeAtMs > 0 && now - speaker.lastSpokeAtMs <= SPEAKING_HOLD_MS;
+  if (speaker.itemEl) {
+    speaker.itemEl.classList.toggle("speaking", isSpeaking);
+    speaker.itemEl.title = isSpeaking ? `${speaker.name} is speaking` : `${speaker.name} is silent`;
+  }
+  if (speaker.indicatorEl) {
+    speaker.indicatorEl.classList.toggle("speaking", isSpeaking);
+  }
+}
+
+function updateRelayStreamOwners(activeStreams) {
+  streamOwners = new Map();
+  if (!Array.isArray(activeStreams)) {
+    return;
+  }
+  for (const stream of activeStreams) {
+    const streamId = Number(stream.stream_id);
+    const clientId = String(stream.client_id || "");
+    if (Number.isInteger(streamId) && streamId >= 0 && clientId) {
+      streamOwners.set(streamId, clientId);
+    }
+  }
+}
+
+function setupStreamSpeakerMeter(meterKey, stream, getClientId) {
+  if (typeof AudioContext !== "function") {
+    return;
+  }
+  removeSpeakerMeter(meterKey);
+  try {
+    if (!speakerMeterContext) {
+      speakerMeterContext = new AudioContext();
+    }
+    speakerMeterContext.resume().catch(() => {});
+    const source = speakerMeterContext.createMediaStreamSource(stream);
+    const analyser = speakerMeterContext.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.2;
+    source.connect(analyser);
+    speakerMeters.set(meterKey, {
+      source,
+      analyser,
+      data: new Uint8Array(analyser.fftSize),
+      getClientId,
+    });
+  } catch (error) {
+    console.warn("Speaker meter could not be created", error);
+  }
+}
+
+function removeSpeakerMeter(meterKey) {
+  const meter = speakerMeters.get(meterKey);
+  if (!meter) {
+    return;
+  }
+  try {
+    meter.source.disconnect();
+  } catch (error) {
+    // The node may already be disconnected by the browser.
+  }
+  speakerMeters.delete(meterKey);
+}
+
+function cleanupSpeakerMeters() {
+  for (const meterKey of Array.from(speakerMeters.keys())) {
+    removeSpeakerMeter(meterKey);
+  }
+  if (speakerMeterContext) {
+    speakerMeterContext.close().catch(() => {});
+    speakerMeterContext = null;
+  }
+}
+
+function refreshSpeakingIndicators() {
+  sampleSpeakerMeters();
+  const now = performance.now();
+  for (const speaker of speakerStates.values()) {
+    updateSpeakerIndicator(speaker, now);
+  }
+}
+
+function sampleSpeakerMeters() {
+  for (const meter of speakerMeters.values()) {
+    const clientId = String(meter.getClientId() || "");
+    if (!clientId) {
+      continue;
+    }
+    meter.analyser.getByteTimeDomainData(meter.data);
+    const rms = rmsFromByteTimeDomain(meter.data);
+    if (rms >= SPEAKING_RMS_THRESHOLD) {
+      markSpeaking(clientId);
+    }
+  }
+}
+
+function markSpeaking(clientId) {
+  const speaker = speakerStates.get(clientId);
+  if (!speaker) {
+    return;
+  }
+  speaker.lastSpokeAtMs = performance.now();
+}
+
+function markRelayPacketSpeaking(remoteStreamId, pcm) {
+  const clientId = streamOwners.get(remoteStreamId);
+  if (!clientId) {
+    return;
+  }
+  if (rmsFromInt16(pcm) >= SPEAKING_RMS_THRESHOLD) {
+    markSpeaking(clientId);
+  }
+}
+
+function rmsFromByteTimeDomain(data) {
+  if (data.length === 0) {
+    return 0;
+  }
+  let sumSquares = 0;
+  for (let index = 0; index < data.length; index += 1) {
+    const sample = (data[index] - 128) / 128;
+    sumSquares += sample * sample;
+  }
+  return Math.sqrt(sumSquares / data.length);
+}
+
+function rmsFromInt16(pcm) {
+  if (pcm.length === 0) {
+    return 0;
+  }
+  let sumSquares = 0;
+  for (let index = 0; index < pcm.length; index += 1) {
+    const sample = pcm[index] / 32768;
+    sumSquares += sample * sample;
+  }
+  return Math.sqrt(sumSquares / pcm.length);
+}
+
 function playPcm16(packet) {
   if (!audioContext) {
     return;
@@ -728,6 +956,8 @@ function playPcm16(packet) {
     state.nextPlaybackTime = now + MIN_PLAYBACK_LEAD_SECONDS;
     return;
   }
+
+  markRelayPacketSpeaking(packet.streamId, pcm);
 
   const node = audioContext.createBufferSource();
   node.buffer = audioBuffer;
