@@ -592,7 +592,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     display_urls: list[str]
     using_tailscale = False
     if args.tailscale:
-        tailscale_config = discover_tailscale(args.tailscale_cert_dir, require_cert=True)
+        tailscale_cert_dir = resolve_project_path(args.tailscale_cert_dir, project_dir)
+        tailscale_config = discover_tailscale(tailscale_cert_dir, require_cert=True)
         host = tailscale_config.ip
         cert_path = tailscale_config.cert_path
         key_path = tailscale_config.key_path
@@ -632,6 +633,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         print("The first browser visit will show a self-signed certificate warning. Continue to the site.")
     web.run_app(app, host=host, port=args.port, ssl_context=ssl_context)
     return 0
+
+
+def resolve_project_path(path_value: str | None, project_dir: Path) -> Path | None:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return project_dir / path
 
 
 if __name__ == "__main__":

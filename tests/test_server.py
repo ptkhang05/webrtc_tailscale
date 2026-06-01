@@ -22,6 +22,7 @@ from web_intercom.server import (
     build_arg_parser,
     create_app,
     load_room_key,
+    resolve_project_path,
 )
 from web_intercom.tailscale import find_tailscale_cert
 
@@ -40,6 +41,13 @@ def test_parser_defaults():
     assert args.max_connections_per_ip == MAX_CONNECTIONS_PER_IP
     assert args.max_auth_failures_per_ip == MAX_AUTH_FAILURES_PER_IP
     assert args.auth_failure_window == 60.0
+
+
+def test_resolve_project_path_uses_project_dir_for_relative_paths(tmp_path):
+    assert resolve_project_path("certs/tailscale", tmp_path) == tmp_path / "certs/tailscale"
+    absolute = tmp_path / "custom-certs"
+    assert resolve_project_path(str(absolute), tmp_path) == absolute
+    assert resolve_project_path(None, tmp_path) is None
 
 
 def test_load_room_key_from_value():

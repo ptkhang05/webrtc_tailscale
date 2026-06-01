@@ -32,6 +32,19 @@ python -m pip install -r requirements.txt
 
 If you downloaded the project as a ZIP file instead of using Git, open a terminal in the extracted project folder and run the same `python -m pip install -r requirements.txt` command.
 
+All commands in this README assume your terminal is inside the project folder, the folder that contains `README.md`, `requirements.txt`, `static\`, and `web_intercom\`. If a command cannot find `requirements.txt`, `web_intercom`, or `certs\tailscale`, run:
+
+```powershell
+cd path\to\webrtc_tailscale
+```
+
+You can verify the current folder with:
+
+```powershell
+Test-Path .\requirements.txt
+Test-Path .\web_intercom\server.py
+```
+
 ## Run
 
 ```powershell
@@ -91,7 +104,37 @@ In the Tailscale admin console, enable:
 - MagicDNS
 - HTTPS Certificates
 
-Then create a Tailscale HTTPS certificate on the Windows 11 server:
+### 3. Install the intercom project on the Windows 11 server
+
+Open PowerShell in the folder where you want to store the project, then run:
+
+```powershell
+git clone https://github.com/ptkhang05/webrtc_tailscale.git
+cd webrtc_tailscale
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+If PowerShell blocks virtual-environment activation, run only for the current terminal:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+Before continuing, verify that you are still inside the project folder:
+
+```powershell
+Test-Path .\README.md
+Test-Path .\web_intercom\server.py
+```
+
+Both commands should print `True`.
+
+### 4. Create the Tailscale HTTPS certificate inside the project folder
+
+Run this from the project folder, not from `C:\Windows\System32`:
 
 ```powershell
 $TAILSCALE = (Get-Command tailscale -ErrorAction SilentlyContinue).Source
@@ -113,24 +156,7 @@ certs\tailscale\<hostname>.key
 
 Keep the `.key` file private. Do not upload `certs\` to GitHub.
 
-### 3. Install the intercom project on the Windows 11 server
-
-```powershell
-git clone https://github.com/ptkhang05/webrtc_tailscale.git
-cd webrtc_tailscale
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
-
-If PowerShell blocks virtual-environment activation, run only for the current terminal:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-### 4. Allow the server port through Windows Firewall
+### 5. Allow the server port through Windows Firewall
 
 Run PowerShell as Administrator:
 
@@ -138,9 +164,9 @@ Run PowerShell as Administrator:
 New-NetFirewallRule -DisplayName "Secure Web Intercom Tailscale 8443" -Direction Inbound -Protocol TCP -LocalPort 8443 -Action Allow
 ```
 
-### 5. Run the intercom bound to the Tailscale IP
+### 6. Run the intercom bound to the Tailscale IP
 
-In the project folder:
+In the project folder, with the virtual environment activated:
 
 ```powershell
 $env:WEB_INTERCOM_KEY = "change-this-demo-secret"
@@ -155,7 +181,7 @@ https://server-name.tailxxxx.ts.net:8443
 
 Only devices inside the tailnet should be able to reach it. In this mode, the Python server binds to the Tailscale `100.x.y.z` address instead of `0.0.0.0`, and the browser should not show a certificate warning because the `*.ts.net` certificate is valid.
 
-### 6. Connect Windows clients
+### 7. Connect Windows clients
 
 On every client machine:
 
@@ -171,7 +197,7 @@ On every client machine:
 
 If WebRTC cannot establish a P2P path in a specific browser/network combination, switch media mode to `WSS relay fallback`.
 
-### 7. Optional Tailscale ACL
+### 8. Optional Tailscale ACL
 
 Restrict access so only approved client devices can reach the server port.
 
