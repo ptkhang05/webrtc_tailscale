@@ -275,18 +275,18 @@ python -m web_intercom.server --host 0.0.0.0 --port 8443 --stats-interval 5 --me
 
 The workbook is updated every reporting interval and contains:
 
-- `Summary`: the selected paper-ready run metrics, including p95 delay, p95 jitter, late-drop rate, underrun duration, MOS, relay bitrate, relay drops, and browser timing stability.
-- `QoS Summary`: application-level QoS indicators: estimated one-way delay, RFC 3550 inter-arrival jitter, sequence-gap rate, late-drop rate, underruns, relay-drop rate, and peak relay payload bitrate.
-- `QoE Summary`: estimated R-factor and MOS values using a simplified ITU-T G.107 E-model.
-- `Jitter CDF`: percentile data for RFC 3550 jitter.
-- `Client Summary`: latest per-browser QoS/QoE and validity metrics.
-- `Time Series`: compact interval samples for plotting paper figures across LAN/Wi-Fi/congested scenarios.
+- `Summary`: the selected paper-ready run metrics, including p95 delay, p95 audio jitter, WebRTC media RTT/loss, late-drop rate, underrun duration, MOS, relay bitrate, relay drops, and browser timing stability.
+- `QoS Summary`: application-level QoS indicators: estimated one-way delay, audio jitter, WebRTC packet loss/RTT, sequence-gap rate, late-drop rate, underruns, relay-drop rate, and peak relay payload bitrate.
+- `QoE Summary`: estimated R-factor and MOS values using a simplified ITU-T G.107 E-model, with relay late drops or WebRTC packet loss used as the media impairment input.
+- `Jitter CDF`: percentile data for relay RFC 3550 jitter or WebRTC RTP audio jitter, depending on the selected media mode.
+- `Client Summary`: latest per-browser QoS/QoE, WebRTC codec/candidate-pair details, and validity metrics.
+- `Time Series`: compact interval samples for plotting paper figures across LAN/Wi-Fi/congested/Tailscale scenarios.
 - `Paper Metrics`: an explanation of which metrics are suitable for the paper and how to use them.
 
 Browsers automatically send client-side measurement data to the server. You do not need to install anything on client machines.
 
 Workbook generation runs in a separate process so report writing does not compete with the server event loop for Python's GIL during audio relay.
-The workbook is intentionally data-only: it keeps normal Excel gridlines, starts each sheet with a plain header row, and does not create charts, merged title rows, hidden helper ranges, or styled table objects. It focuses on metrics that can support an IEEE-style experimental section: delay, jitter, late delivery, playout continuity, MOS, relay scalability, and browser capture stability.
+The workbook is intentionally data-only: it keeps normal Excel gridlines, starts each sheet with a plain header row, and does not create charts, merged title rows, hidden helper ranges, freeze panes, or styled table objects. It focuses on metrics that can support an IEEE-style experimental section: delay, jitter, late delivery, playout continuity, MOS, relay scalability, WebRTC path behavior, and browser capture stability.
 
 Do not keep the workbook open in Excel while the server is running. Windows may lock the file; if that happens, close Excel and the next reporting interval will retry the update.
 
@@ -299,7 +299,9 @@ D(i,j) = (Rj - Ri) - (Sj - Si)
 J = J + (|D(i,j)| - J) / 16
 ```
 
-The browser also sends WebSocket QoS pings. The workbook reports `estimated_owd_ms` as `RTT / 2`, which is a practical LAN approximation that avoids requiring synchronized clocks between client machines. Treat it as an estimate, not a hardware timestamp measurement.
+The browser also sends WebSocket QoS pings. In relay mode, the workbook reports `estimated_owd_ms` as WebSocket `RTT / 2`. In WebRTC mode, the browser uses WebRTC media or selected candidate-pair RTT when available, and keeps the WebSocket control RTT in `websocket_rtt_ms`. Treat both one-way delay values as estimates, not hardware timestamp measurements.
+
+In WebRTC mode, the browser exports audio RTP stats from `RTCPeerConnection.getStats()`: inbound packets lost, packet-loss rate, RTP audio jitter, media/candidate-pair RTT, codec, selected local/remote ICE candidate types, and candidate protocol. The MOS estimator uses WebRTC packet-loss rate as its media impairment input for WebRTC runs.
 
 Playback scheduling is tracked per remote stream. It flushes an overgrown stream queue instead of waiting for stale buffered audio to drain. When a stream queue is flushed, scheduled `AudioBufferSourceNode` instances for that stream are stopped so stale audio cannot overlap with newly scheduled packets. After silence or network gaps longer than 100 ms, the next received audio packet is treated as a fresh talk burst, so the beginning of speech is not discarded and silence is not counted as a buffer underrun.
 
@@ -307,7 +309,7 @@ Sequence gaps are reported as `network_loss_packets`, but only forward sequence 
 
 Presence messages include `active_stream_ids`, allowing browsers to remove state and scheduled audio nodes for streams that have left the room.
 
-For IEEE-style experiments, run the same scenario under controlled network conditions and compare results. Useful scenarios include normal LAN, added delay, added packet loss, congested Wi-Fi, Tailscale + WebRTC, and Tailscale + WSS relay fallback. The relay path is WebSocket/TCP with PCM16; it is intentionally measurable but can accumulate delay under loss because TCP preserves ordering.
+For IEEE-style experiments, run the same scenario under controlled network conditions and compare results. Useful scenarios include normal LAN, added delay, added packet loss, congested Wi-Fi, Tailscale + WebRTC, and Tailscale + WSS relay fallback. The relay path is WebSocket/TCP with PCM16; it is intentionally measurable but can accumulate delay under loss because TCP preserves ordering. WebRTC P2P runs can now be plotted from the same workbook using WebRTC jitter, packet-loss, RTT, codec, and selected-candidate fields.
 
 ## Firewall
 
@@ -337,9 +339,9 @@ New-NetFirewallRule -DisplayName "Secure Web Intercom HTTPS 8443" -Direction Inb
 
 Recommended next upgrades:
 
-1. Add richer WebRTC statistics export for packet loss, jitter, round-trip time, codec, and selected ICE candidate pair.
-2. Add optional TURN or controlled ICE-server configuration for environments where browser host candidates cannot connect over Tailscale.
-3. Compare Tailscale + WebRTC against Tailscale + WSS relay fallback under the same network conditions.
+1. Add optional TURN or controlled ICE-server configuration for environments where browser host candidates cannot connect over Tailscale.
+2. Compare Tailscale + WebRTC against Tailscale + WSS relay fallback under the same network conditions.
+3. Add automated chart generation from the workbook for the two paper figures.
 
 ## Tests
 

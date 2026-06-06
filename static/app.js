@@ -82,6 +82,17 @@ function createMetrics() {
     rttMs: 0,
     estimatedOwdMs: 0,
     rfc3550JitterMs: 0,
+    websocketRttMs: 0,
+    websocketEstimatedOwdMs: 0,
+    webrtcPacketsLost: 0,
+    webrtcPacketLossRatePercent: 0,
+    webrtcJitterMs: 0,
+    webrtcRttMs: 0,
+    webrtcSelectedCandidatePair: "",
+    webrtcLocalCandidateType: "",
+    webrtcRemoteCandidateType: "",
+    webrtcCandidateProtocol: "",
+    webrtcCodec: "",
   };
 }
 
@@ -311,8 +322,12 @@ function handleControlMessage(message) {
   if (message.type === "qos_pong") {
     const sentAtMs = Number(message.client_time_ms || 0);
     if (sentAtMs > 0) {
-      metrics.rttMs = Math.max(0, performance.now() - sentAtMs);
-      metrics.estimatedOwdMs = metrics.rttMs / 2;
+      metrics.websocketRttMs = Math.max(0, performance.now() - sentAtMs);
+      metrics.websocketEstimatedOwdMs = metrics.websocketRttMs / 2;
+      if (mediaMode !== MEDIA_MODE_WEBRTC || metrics.webrtcRttMs <= 0) {
+        metrics.rttMs = metrics.websocketRttMs;
+        metrics.estimatedOwdMs = metrics.websocketEstimatedOwdMs;
+      }
     }
     return;
   }
@@ -489,6 +504,45 @@ function iceCandidateToJson(candidate) {
   };
 }
 
+function meanPositive(values) {
+  const positives = values.filter((value) => Number.isFinite(value) && value > 0);
+  if (positives.length === 0) {
+    return 0;
+  }
+  return positives.reduce((total, value) => total + value, 0) / positives.length;
+}
+
+function maxPositive(values) {
+  const positives = values.filter((value) => Number.isFinite(value) && value > 0);
+  if (positives.length === 0) {
+    return 0;
+  }
+  return Math.max(...positives);
+}
+
+function codecLabel(codec) {
+  if (!codec) {
+    return "";
+  }
+  const mimeType = String(codec.mimeType || "").replace(/^audio\//i, "");
+  const clockRate = Number(codec.clockRate || 0);
+  return clockRate > 0 ? `${mimeType}/${clockRate}` : mimeType;
+}
+
+function candidateTypeLabel(candidate) {
+  if (!candidate) {
+    return "";
+  }
+  return String(candidate.candidateType || candidate.type || "");
+}
+
+function candidateProtocolLabel(candidate) {
+  if (!candidate) {
+    return "";
+  }
+  return String(candidate.protocol || candidate.transport || "").toLowerCase();
+}
+
 function sendWebRtcSignal(peerId, signal) {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return;
@@ -538,15 +592,81 @@ async function updateWebRtcStats() {
   let receivedBytes = 0;
   let sentPackets = 0;
   let receivedPackets = 0;
+  let packetsLost = 0;
+  const jitterValuesMs = [];
+  const rttValuesMs = [];
+  const candidatePairLabels = new Set();
+  const localCandidateTypes = new Set();
+  const remoteCandidateTypes = new Set();
+  const candidateProtocols = new Set();
+  const codecLabels = new Set();
   for (const state of peerConnections.values()) {
     const report = await state.peerConnection.getStats();
+    let selectedPair = null;
     for (const item of report.values()) {
-      if (item.type === "outbound-rtp" && item.kind === "audio") {
+      const isAudioRtp = item.kind === "audio" || item.mediaType === "audio";
+      if (item.type === "outbound-rtp" && isAudioRtp) {
         sentBytes += Number(item.bytesSent || 0);
         sentPackets += Number(item.packetsSent || 0);
-      } else if (item.type === "inbound-rtp" && item.kind === "audio") {
+        if (item.codecId) {
+          const codec = report.get(item.codecId);
+          const label = codecLabel(codec);
+          if (label) {
+            codecLabels.add(label);
+          }
+        }
+      } else if (item.type === "inbound-rtp" && isAudioRtp) {
         receivedBytes += Number(item.bytesReceived || 0);
         receivedPackets += Number(item.packetsReceived || 0);
+        packetsLost += Math.max(0, Number(item.packetsLost || 0));
+        const jitterSeconds = Number(item.jitter || 0);
+        if (jitterSeconds > 0) {
+          jitterValuesMs.push(jitterSeconds * 1000);
+        }
+        const inboundRttSeconds = Number(item.roundTripTime || 0);
+        if (inboundRttSeconds > 0) {
+          rttValuesMs.push(inboundRttSeconds * 1000);
+        }
+        if (item.codecId) {
+          const codec = report.get(item.codecId);
+          const label = codecLabel(codec);
+          if (label) {
+            codecLabels.add(label);
+          }
+        }
+      } else if (item.type === "remote-inbound-rtp" && isAudioRtp) {
+        const remoteInboundRttSeconds = Number(item.roundTripTime || 0);
+        if (remoteInboundRttSeconds > 0) {
+          rttValuesMs.push(remoteInboundRttSeconds * 1000);
+        }
+      } else if (item.type === "candidate-pair") {
+        const isSelected = item.selected === true || item.nominated === true;
+        if (item.state === "succeeded" && (isSelected || selectedPair === null)) {
+          selectedPair = item;
+        }
+      }
+    }
+    if (selectedPair) {
+      const pairRttSeconds = Number(selectedPair.currentRoundTripTime || 0);
+      if (pairRttSeconds > 0) {
+        rttValuesMs.push(pairRttSeconds * 1000);
+      }
+      const localCandidate = report.get(selectedPair.localCandidateId);
+      const remoteCandidate = report.get(selectedPair.remoteCandidateId);
+      const localType = candidateTypeLabel(localCandidate);
+      const remoteType = candidateTypeLabel(remoteCandidate);
+      const protocol = candidateProtocolLabel(localCandidate) || candidateProtocolLabel(remoteCandidate);
+      if (localType) {
+        localCandidateTypes.add(localType);
+      }
+      if (remoteType) {
+        remoteCandidateTypes.add(remoteType);
+      }
+      if (protocol) {
+        candidateProtocols.add(protocol);
+      }
+      if (localType || remoteType || protocol) {
+        candidatePairLabels.add(`${localType || "unknown"}-${remoteType || "unknown"}${protocol ? `/${protocol}` : ""}`);
       }
     }
   }
@@ -558,6 +678,22 @@ async function updateWebRtcStats() {
   metrics.receivedPackets = receivedPackets;
   metrics.playedPackets = receivedPackets;
   metrics.packets = sentPackets + receivedPackets;
+  metrics.webrtcPacketsLost = packetsLost;
+  metrics.webrtcPacketLossRatePercent =
+    receivedPackets + packetsLost > 0 ? (packetsLost / (receivedPackets + packetsLost)) * 100 : 0;
+  metrics.webrtcJitterMs = maxPositive(jitterValuesMs);
+  metrics.webrtcRttMs = meanPositive(rttValuesMs);
+  metrics.webrtcSelectedCandidatePair = Array.from(candidatePairLabels).sort().join("; ").slice(0, 160);
+  metrics.webrtcLocalCandidateType = Array.from(localCandidateTypes).sort().join("; ").slice(0, 80);
+  metrics.webrtcRemoteCandidateType = Array.from(remoteCandidateTypes).sort().join("; ").slice(0, 80);
+  metrics.webrtcCandidateProtocol = Array.from(candidateProtocols).sort().join("; ").slice(0, 40);
+  metrics.webrtcCodec = Array.from(codecLabels).sort().join("; ").slice(0, 120);
+  metrics.networkLossPackets = packetsLost;
+  metrics.rfc3550JitterMs = metrics.webrtcJitterMs;
+  if (metrics.webrtcRttMs > 0) {
+    metrics.rttMs = metrics.webrtcRttMs;
+    metrics.estimatedOwdMs = metrics.webrtcRttMs / 2;
+  }
 }
 
 function cleanupFailedConnect() {
@@ -998,10 +1134,16 @@ function sendBrowserMetrics() {
   }
   const playbackQueueSeconds = currentPlaybackQueueSeconds();
   const sessionDurationSeconds = Math.max(0, (performance.now() - metrics.connectedAtMs) / 1000);
+  const pathRttMs = mediaMode === MEDIA_MODE_WEBRTC && metrics.webrtcRttMs > 0 ? metrics.webrtcRttMs : metrics.rttMs;
+  const pathEstimatedOwdMs =
+    mediaMode === MEDIA_MODE_WEBRTC && metrics.webrtcRttMs > 0 ? metrics.webrtcRttMs / 2 : metrics.estimatedOwdMs;
+  const pathJitterMs =
+    mediaMode === MEDIA_MODE_WEBRTC && metrics.webrtcJitterMs > 0 ? metrics.webrtcJitterMs : metrics.rfc3550JitterMs;
   socket.send(
     JSON.stringify({
       type: "metrics",
       metrics: {
+        media_mode: mediaMode,
         session_duration_seconds: Number(sessionDurationSeconds.toFixed(3)),
         captured_frames: metrics.capturedFrames,
         sent_packets: metrics.sentPackets,
@@ -1019,9 +1161,19 @@ function sendBrowserMetrics() {
         buffer_underrun_events: metrics.bufferUnderrunEvents,
         buffer_underrun_seconds: Number(metrics.bufferUnderrunSeconds.toFixed(3)),
         max_buffer_underrun_ms: Number(metrics.maxBufferUnderrunMs.toFixed(3)),
-        rtt_ms: Number(metrics.rttMs.toFixed(3)),
-        estimated_owd_ms: Number(metrics.estimatedOwdMs.toFixed(3)),
-        rfc3550_jitter_ms: Number(metrics.rfc3550JitterMs.toFixed(3)),
+        rtt_ms: Number(pathRttMs.toFixed(3)),
+        estimated_owd_ms: Number(pathEstimatedOwdMs.toFixed(3)),
+        rfc3550_jitter_ms: Number(pathJitterMs.toFixed(3)),
+        websocket_rtt_ms: Number(metrics.websocketRttMs.toFixed(3)),
+        webrtc_packets_lost: metrics.webrtcPacketsLost,
+        webrtc_packet_loss_rate_percent: Number(metrics.webrtcPacketLossRatePercent.toFixed(3)),
+        webrtc_jitter_ms: Number(metrics.webrtcJitterMs.toFixed(3)),
+        webrtc_rtt_ms: Number(metrics.webrtcRttMs.toFixed(3)),
+        webrtc_selected_candidate_pair: metrics.webrtcSelectedCandidatePair,
+        webrtc_local_candidate_type: metrics.webrtcLocalCandidateType,
+        webrtc_remote_candidate_type: metrics.webrtcRemoteCandidateType,
+        webrtc_candidate_protocol: metrics.webrtcCandidateProtocol,
+        webrtc_codec: metrics.webrtcCodec,
         callback_interval_mean_ms: Number(workletCallbackStats.mean.toFixed(3)),
         callback_interval_stddev_ms: Number(statStddev(workletCallbackStats).toFixed(3)),
         callback_interval_max_ms: Number(workletCallbackStats.max.toFixed(3)),

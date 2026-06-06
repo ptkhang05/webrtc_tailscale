@@ -544,6 +544,45 @@ def test_qos_summary_late_drop_rate_uses_received_denominator(tmp_path):
     assert values["Late drop rate"] == 20
 
 
+def test_metrics_workbook_contains_webrtc_stats(tmp_path):
+    relay = WebIntercomServer("secret")
+    relay.metrics.record_join("client-0001", "alice", "main", time.monotonic())
+    relay.metrics.record_client_metrics(
+        "client-0001",
+        {
+            "media_mode": "webrtc",
+            "session_duration_seconds": 5,
+            "received_packets": 90,
+            "webrtc_packets_lost": 10,
+            "webrtc_packet_loss_rate_percent": 10,
+            "webrtc_jitter_ms": 3,
+            "webrtc_rtt_ms": 40,
+            "webrtc_codec": "opus/48000",
+            "webrtc_selected_candidate_pair": "host-host/udp",
+            "webrtc_local_candidate_type": "host",
+            "webrtc_remote_candidate_type": "host",
+            "webrtc_candidate_protocol": "udp",
+        },
+    )
+    relay.metrics.sample([("client-0001", "alice", "main")])
+    output = tmp_path / "webrtc_metrics.xlsx"
+
+    relay.metrics.write_workbook(output)
+
+    workbook = load_workbook(output, data_only=True)
+    qos_values = {row[0].value: row[1].value for row in workbook["QoS Summary"].iter_rows(min_row=2, max_col=2)}
+    qoe_values = {row[0].value: row[1].value for row in workbook["QoE Summary"].iter_rows(min_row=2, max_col=2)}
+    client_headers = [cell.value for cell in workbook["Client Summary"][1]]
+    time_series_headers = [cell.value for cell in workbook["Time Series"][1]]
+
+    assert qos_values["WebRTC packet loss rate"] == 10
+    assert qos_values["WebRTC audio jitter p95"] == 3
+    assert qoe_values["Media impairment rate"] == 10
+    assert "webrtc_selected_candidate_pair" in client_headers
+    assert "webrtc_codec" in client_headers
+    assert "browser_avg_webrtc_packet_loss_rate_percent" in time_series_headers
+
+
 def test_async_workbook_writer_uses_picklable_snapshot(tmp_path):
     async def run() -> None:
         relay = WebIntercomServer("secret")

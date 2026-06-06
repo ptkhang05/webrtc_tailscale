@@ -68,7 +68,11 @@ SERVER_GUIDE = {
     "browser_avg_rtt_ms": ("Average RTT", "ms", "Average browser-to-server WebSocket control round-trip time."),
     "browser_max_rtt_ms": ("Max RTT", "ms", "Largest browser-to-server WebSocket control round-trip time."),
     "browser_avg_estimated_owd_ms": ("Average estimated OWD", "ms", "Average one-way delay estimate as RTT/2. This does not require synchronized clocks."),
-    "browser_max_jitter_ms": ("Max RFC3550 jitter", "ms", "Maximum browser-estimated inter-arrival jitter using the RFC 3550 estimator."),
+    "browser_max_jitter_ms": ("Max audio jitter", "ms", "Maximum relay RFC3550 or WebRTC RTP audio jitter reported by browsers."),
+    "browser_webrtc_packets_lost": ("WebRTC packets lost", "packets", "Total inbound WebRTC audio packets reported lost by browsers."),
+    "browser_avg_webrtc_packet_loss_rate_percent": ("Average WebRTC packet-loss rate", "%", "Average WebRTC inbound audio packet-loss rate reported by browsers."),
+    "browser_max_webrtc_jitter_ms": ("Max WebRTC audio jitter", "ms", "Maximum WebRTC RTP audio jitter reported by browsers."),
+    "browser_avg_webrtc_rtt_ms": ("Average WebRTC RTT", "ms", "Average WebRTC media/candidate-pair round-trip time reported by browsers."),
     "browser_avg_playout_latency_ms": ("Average playout latency estimate", "ms", "Estimated client-side network plus playback queue delay."),
     "browser_avg_estimated_mos": ("Average estimated MOS", "MOS", "Average objective MOS estimate from the simplified ITU-T G.107 E-model."),
     "browser_min_estimated_mos": ("Minimum estimated MOS", "MOS", "Worst client MOS estimate at this sample."),
@@ -85,6 +89,7 @@ CLIENT_GUIDE = {
     "name": ("Name", "", "Browser display name."),
     "room": ("Room", "", "Intercom room name."),
     "status": ("Status", "", "Whether the client is active at workbook export time."),
+    "media_mode": ("Media mode", "", "Browser media path: WebRTC P2P or WSS relay fallback."),
     "session_duration_seconds": ("Session duration", "seconds", "Elapsed browser session time reported by the client."),
     "uptime_seconds": ("Client uptime", "seconds", "Elapsed time since this client joined."),
     "captured_frames": ("Captured frames", "frames", "Microphone callback frames captured in the browser."),
@@ -103,9 +108,19 @@ CLIENT_GUIDE = {
     "buffer_underrun_events": ("Buffer underrun events", "events", "Times playback discovered that the scheduled playout buffer had run dry."),
     "buffer_underrun_seconds": ("Buffer underrun duration", "seconds", "Total playback gap duration caused by buffer underruns."),
     "max_buffer_underrun_ms": ("Max buffer underrun", "ms", "Largest single playback gap caused by an underrun."),
-    "rtt_ms": ("WebSocket RTT", "ms", "Browser-to-server control round-trip time measured with a lightweight QoS ping."),
-    "estimated_owd_ms": ("Estimated one-way delay", "ms", "Approximate browser-to-server one-way delay, computed as RTT/2 under symmetric-path assumption."),
-    "rfc3550_jitter_ms": ("RFC3550 jitter", "ms", "Inter-arrival jitter estimate computed from audio packet send and receive timestamp differences."),
+    "rtt_ms": ("Path RTT", "ms", "Round-trip time used for QoE estimation: WebRTC media/candidate RTT in WebRTC mode, or browser-to-server WebSocket RTT in relay mode."),
+    "estimated_owd_ms": ("Estimated one-way delay", "ms", "Approximate one-way delay, computed as path RTT/2 under symmetric-path assumption."),
+    "rfc3550_jitter_ms": ("Audio jitter", "ms", "Relay RFC3550 inter-arrival jitter or WebRTC RTP audio jitter, depending on media mode."),
+    "websocket_rtt_ms": ("WebSocket RTT", "ms", "Browser-to-server control round-trip time measured with a lightweight QoS ping."),
+    "webrtc_packets_lost": ("WebRTC packets lost", "packets", "Inbound WebRTC audio packets reported lost by browser RTP stats."),
+    "webrtc_packet_loss_rate_percent": ("WebRTC packet-loss rate", "%", "Inbound WebRTC audio packets lost divided by received plus lost packets."),
+    "webrtc_jitter_ms": ("WebRTC audio jitter", "ms", "Inbound WebRTC RTP audio jitter reported by browser stats."),
+    "webrtc_rtt_ms": ("WebRTC RTT", "ms", "WebRTC media or selected candidate-pair round-trip time reported by browser stats."),
+    "webrtc_selected_candidate_pair": ("WebRTC candidate pair", "", "Selected ICE candidate-pair summary, expressed as local type, remote type, and protocol."),
+    "webrtc_local_candidate_type": ("WebRTC local candidate type", "", "Selected local ICE candidate type."),
+    "webrtc_remote_candidate_type": ("WebRTC remote candidate type", "", "Selected remote ICE candidate type."),
+    "webrtc_candidate_protocol": ("WebRTC candidate protocol", "", "Selected ICE candidate transport protocol."),
+    "webrtc_codec": ("WebRTC codec", "", "Audio codec reported by WebRTC RTP stats."),
     "callback_interval_mean_ms": ("AudioWorklet callback mean", "ms", "Mean interval between AudioWorklet process callbacks in audio time."),
     "callback_interval_stddev_ms": ("AudioWorklet callback stddev", "ms", "Standard deviation of AudioWorklet process callback intervals."),
     "callback_interval_max_ms": ("AudioWorklet callback max", "ms", "Maximum observed AudioWorklet process callback interval."),
@@ -121,6 +136,7 @@ CLIENT_GUIDE = {
     "playback_queue_seconds": ("Playback queue", "seconds", "Estimated browser playback buffer delay."),
     "estimated_playout_latency_ms": ("Estimated playout latency", "ms", "Estimated one-way network delay plus current playback queue delay and capture quantum."),
     "late_drop_rate_percent": ("Late drop rate", "%", "Late dropped packets divided by received packets."),
+    "media_impairment_rate_percent": ("Media impairment rate", "%", "Late-drop rate in relay mode or WebRTC packet-loss rate in WebRTC mode, used by the MOS estimator."),
     "buffer_underrun_rate_per_min": ("Buffer underrun rate", "events/min", "Playback underrun events normalized by browser session duration."),
     "r_factor": ("E-model R-factor", "score", "Simplified ITU-T G.107 R-factor estimated from delay and late/drop impairment."),
     "estimated_mos": ("Estimated MOS", "MOS", "Estimated Mean Opinion Score mapped from the R-factor."),
@@ -279,6 +295,10 @@ class WebIntercomMetrics:
             "browser_max_rtt_ms": 0.0,
             "browser_avg_estimated_owd_ms": 0.0,
             "browser_max_jitter_ms": 0.0,
+            "browser_webrtc_packets_lost": 0,
+            "browser_avg_webrtc_packet_loss_rate_percent": 0.0,
+            "browser_max_webrtc_jitter_ms": 0.0,
+            "browser_avg_webrtc_rtt_ms": 0.0,
             "browser_avg_playout_latency_ms": 0.0,
             "browser_avg_estimated_mos": 0.0,
             "browser_min_estimated_mos": 0.0,
@@ -305,10 +325,14 @@ class WebIntercomMetrics:
             "buffer_underrun_events": "browser_buffer_underrun_events",
             "resampled_frames": "browser_resampled_frames",
             "capture_queue_dropped_frames": "browser_capture_queue_dropped_frames",
+            "webrtc_packets_lost": "browser_webrtc_packets_lost",
         }
         rtt_values: list[float] = []
         owd_values: list[float] = []
         jitter_values: list[float] = []
+        webrtc_loss_rate_values: list[float] = []
+        webrtc_jitter_values: list[float] = []
+        webrtc_rtt_values: list[float] = []
         latency_values: list[float] = []
         mos_values: list[float] = []
         callback_stddev_values: list[float] = []
@@ -326,6 +350,10 @@ class WebIntercomMetrics:
             _append_positive(rtt_values, state.latest.get("rtt_ms"))
             _append_positive(owd_values, state.latest.get("estimated_owd_ms"))
             _append_positive(jitter_values, state.latest.get("rfc3550_jitter_ms"))
+            if state.latest.get("media_mode") == "webrtc":
+                _append_nonnegative(webrtc_loss_rate_values, state.latest.get("webrtc_packet_loss_rate_percent"))
+                _append_positive(webrtc_jitter_values, state.latest.get("webrtc_jitter_ms"))
+                _append_positive(webrtc_rtt_values, state.latest.get("webrtc_rtt_ms"))
             _append_positive(latency_values, state.latest.get("estimated_playout_latency_ms"))
             _append_positive(mos_values, state.latest.get("estimated_mos"))
             _append_positive(callback_stddev_values, state.latest.get("callback_interval_stddev_ms"))
@@ -341,6 +369,9 @@ class WebIntercomMetrics:
         totals["browser_max_rtt_ms"] = _max_values(rtt_values)
         totals["browser_avg_estimated_owd_ms"] = _mean(owd_values)
         totals["browser_max_jitter_ms"] = _max_values(jitter_values)
+        totals["browser_avg_webrtc_packet_loss_rate_percent"] = _mean(webrtc_loss_rate_values)
+        totals["browser_max_webrtc_jitter_ms"] = _max_values(webrtc_jitter_values)
+        totals["browser_avg_webrtc_rtt_ms"] = _mean(webrtc_rtt_values)
         totals["browser_avg_playout_latency_ms"] = _mean(latency_values)
         totals["browser_avg_estimated_mos"] = _mean(mos_values)
         totals["browser_min_estimated_mos"] = _min_values(mos_values)
@@ -375,14 +406,22 @@ def kbps(byte_count: int | float, uptime_seconds: int | float) -> float:
 
 
 def derive_client_qoe_metrics(metrics: Mapping[str, object]) -> MetricRow:
+    media_mode = str(metrics.get("media_mode") or "")
     playback_queue_ms = _as_float(metrics.get("playback_queue_seconds")) * 1000
     estimated_owd_ms = _as_float(metrics.get("estimated_owd_ms"))
+    if media_mode == "webrtc":
+        webrtc_rtt_ms = _as_float(metrics.get("webrtc_rtt_ms"))
+        if webrtc_rtt_ms > 0:
+            estimated_owd_ms = webrtc_rtt_ms / 2
     capture_quantum_ms = _as_float(metrics.get("callback_interval_mean_ms")) or 8.0
     estimated_playout_latency_ms = max(0.0, capture_quantum_ms + estimated_owd_ms + playback_queue_ms)
 
     late_drops = _as_float(metrics.get("late_dropped_packets"))
     received_packets = _as_float(metrics.get("received_packets"))
     late_drop_rate_percent = percentage(late_drops, received_packets)
+    media_impairment_rate_percent = late_drop_rate_percent
+    if media_mode == "webrtc":
+        media_impairment_rate_percent = _as_float(metrics.get("webrtc_packet_loss_rate_percent"))
 
     session_duration_seconds = _as_float(metrics.get("session_duration_seconds"))
     underrun_rate_per_min = 0.0
@@ -391,11 +430,12 @@ def derive_client_qoe_metrics(metrics: Mapping[str, object]) -> MetricRow:
 
     r_factor, estimated_mos = estimate_e_model(
         delay_ms=estimated_playout_latency_ms,
-        late_drop_percent=late_drop_rate_percent,
+        late_drop_percent=media_impairment_rate_percent,
     )
     return {
         "estimated_playout_latency_ms": round(estimated_playout_latency_ms, 3),
         "late_drop_rate_percent": round(late_drop_rate_percent, 3),
+        "media_impairment_rate_percent": round(media_impairment_rate_percent, 3),
         "buffer_underrun_rate_per_min": round(underrun_rate_per_min, 3),
         "r_factor": round(r_factor, 3),
         "estimated_mos": round(estimated_mos, 3),
@@ -494,6 +534,8 @@ def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clie
     latency_values = _client_sample_values(clients, "estimated_playout_latency_ms")
     owd_values = _client_sample_values(clients, "estimated_owd_ms")
     callback_stddev_values = _client_sample_values(clients, "callback_interval_stddev_ms")
+    webrtc_loss_values = _client_sample_values(clients, "webrtc_packet_loss_rate_percent", include_zero=True)
+    webrtc_rtt_values = _client_sample_values(clients, "webrtc_rtt_ms")
 
     summary_rows = [
         ("Measurement duration", _as_float(latest.get("uptime_seconds")), "seconds", "How long this measurement run has been active."),
@@ -502,7 +544,9 @@ def _build_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], clie
         ("Total clients seen", len(clients), "clients", "Unique browser connections during the run."),
         ("Mean estimated OWD", _mean(owd_values) or _as_float(latest.get("browser_avg_estimated_owd_ms")), "ms", "RTT/2 LAN delay estimate used when client clocks are not synchronized."),
         ("P95 playout latency", _percentile(latency_values, 95), "ms", "High-percentile delay estimate for conversational QoE analysis."),
-        ("P95 RFC3550 jitter", _percentile(jitter_values, 95), "ms", "High-percentile inter-arrival jitter for paper plots."),
+        ("P95 audio jitter", _percentile(jitter_values, 95), "ms", "High-percentile relay or WebRTC audio jitter for paper plots."),
+        ("WebRTC media RTT mean", _mean(webrtc_rtt_values), "ms", "Browser-reported WebRTC media or selected candidate-pair RTT."),
+        ("WebRTC packet loss rate", _mean(webrtc_loss_values), "%", "Inbound WebRTC audio packet-loss rate, useful for WebRTC scenario plots."),
         ("Network sequence gap rate", percentage(latest.get("browser_network_loss_packets"), received), "%", "Estimated sequence gaps divided by browser-received packets."),
         ("Late drop rate", percentage(latest.get("browser_late_dropped_packets"), received), "%", "Packets actually discarded because the playout queue budget was exceeded."),
         ("Buffer underrun events", _as_int(latest.get("browser_buffer_underrun_events")), "events", "Browser playout starvation events during the run."),
@@ -528,6 +572,9 @@ def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], 
     latency_values = _client_sample_values(clients, "estimated_playout_latency_ms")
     owd_values = _client_sample_values(clients, "estimated_owd_ms")
     callback_stddev_values = _client_sample_values(clients, "callback_interval_stddev_ms")
+    webrtc_loss_values = _client_sample_values(clients, "webrtc_packet_loss_rate_percent", include_zero=True)
+    webrtc_jitter_values = _client_sample_values(clients, "webrtc_jitter_ms")
+    webrtc_rtt_values = _client_sample_values(clients, "webrtc_rtt_ms")
     late_drops = _as_float(latest.get("browser_late_dropped_packets"))
     received = _as_float(latest.get("browser_received_packets"))
     network_gaps = _as_float(latest.get("browser_network_loss_packets"))
@@ -536,9 +583,12 @@ def _build_qos_summary(sheet: object, latest: MetricRow, rows: list[MetricRow], 
     qos_rows = [
         ("Estimated OWD mean", _mean(owd_values), "ms", "RTT/2 approximation for the browser-to-server path; useful without synchronized LAN clocks."),
         ("Estimated OWD p95", _percentile(owd_values, 95), "ms", "95th percentile one-way delay estimate across client metric samples."),
-        ("RFC3550 jitter mean", _mean(jitter_values), "ms", "Mean inter-arrival jitter calculated from packet timestamp spacing."),
-        ("RFC3550 jitter p95", _percentile(jitter_values, 95), "ms", "95th percentile jitter; this is more useful for paper plots than total byte counters."),
-        ("RFC3550 jitter max", _max_values(jitter_values), "ms", "Worst observed browser jitter estimate."),
+        ("Audio jitter mean", _mean(jitter_values), "ms", "Mean relay RFC3550 or WebRTC RTP audio jitter."),
+        ("Audio jitter p95", _percentile(jitter_values, 95), "ms", "95th percentile audio jitter; this is more useful for paper plots than total byte counters."),
+        ("Audio jitter max", _max_values(jitter_values), "ms", "Worst observed browser audio jitter estimate."),
+        ("WebRTC media RTT mean", _mean(webrtc_rtt_values), "ms", "Mean browser-reported WebRTC media or candidate-pair round-trip time."),
+        ("WebRTC audio jitter p95", _percentile(webrtc_jitter_values, 95), "ms", "95th percentile WebRTC RTP audio jitter for WebRTC P2P runs."),
+        ("WebRTC packet loss rate", _mean(webrtc_loss_values), "%", "Mean inbound WebRTC audio packet-loss rate across WebRTC client samples."),
         ("Network sequence gaps", network_gaps, "packets", "Estimated missing packets from stream sequence discontinuities; separate from actual playout drops."),
         ("Network sequence gap rate", percentage(network_gaps, received), "%", "Sequence gaps divided by browser-received packets; useful when comparing Wi-Fi conditions."),
         ("Late drop rate", percentage(late_drops, received), "%", "Packets actually dropped because TCP/WebSocket delivery caused a per-stream queue budget overflow."),
@@ -560,6 +610,7 @@ def _build_qoe_summary(sheet: object, latest: MetricRow, clients: list[ClientMet
     mos_values = _client_sample_values(clients, "estimated_mos")
     r_values = _client_sample_values(clients, "r_factor")
     latency_values = _client_sample_values(clients, "estimated_playout_latency_ms")
+    impairment_values = _client_sample_values(clients, "media_impairment_rate_percent", include_zero=True)
     latest_mos = _as_float(latest.get("browser_avg_estimated_mos"))
     latest_min_mos = _as_float(latest.get("browser_min_estimated_mos"))
     quality_class = mos_quality_label(latest_mos) if latest_mos > 0 else "No data"
@@ -570,6 +621,7 @@ def _build_qoe_summary(sheet: object, latest: MetricRow, clients: list[ClientMet
         ("Average R-factor", _mean(r_values), "score", "Transmission rating factor before conversion to MOS."),
         ("Minimum R-factor", _min_values(r_values), "score", "Worst observed R-factor."),
         ("Latency p95", _percentile(latency_values, 95), "ms", "High-percentile playout delay used for QoE interpretation."),
+        ("Media impairment rate", _mean(impairment_values), "%", "Late-drop rate for relay runs or WebRTC packet-loss rate for WebRTC runs."),
         ("Latest quality class", quality_class, "", "Quality descriptor for the latest average MOS sample."),
         ("Target threshold", 3.6, "MOS", "Fair quality threshold commonly used as a minimum acceptable intercom target."),
         ("Threshold status", threshold_status, "", "Review if estimated MOS is below the fair-quality target."),
@@ -603,6 +655,7 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState]) -> No
         "name",
         "room",
         "status",
+        "media_mode",
         "session_duration_seconds",
         "sent_packets",
         "received_packets",
@@ -617,7 +670,18 @@ def _build_client_summary(sheet: object, clients: list[ClientMetricState]) -> No
         "rtt_ms",
         "estimated_owd_ms",
         "rfc3550_jitter_ms",
+        "websocket_rtt_ms",
+        "webrtc_packets_lost",
+        "webrtc_packet_loss_rate_percent",
+        "webrtc_jitter_ms",
+        "webrtc_rtt_ms",
+        "webrtc_codec",
+        "webrtc_selected_candidate_pair",
+        "webrtc_local_candidate_type",
+        "webrtc_remote_candidate_type",
+        "webrtc_candidate_protocol",
         "estimated_playout_latency_ms",
+        "media_impairment_rate_percent",
         "buffer_underrun_rate_per_min",
         "r_factor",
         "estimated_mos",
@@ -649,6 +713,10 @@ def _build_time_series(sheet: object, rows: list[MetricRow]) -> None:
         "browser_avg_rtt_ms",
         "browser_avg_estimated_owd_ms",
         "browser_max_jitter_ms",
+        "browser_webrtc_packets_lost",
+        "browser_avg_webrtc_packet_loss_rate_percent",
+        "browser_max_webrtc_jitter_ms",
+        "browser_avg_webrtc_rtt_ms",
         "browser_avg_playout_latency_ms",
         "browser_avg_estimated_mos",
         "browser_min_estimated_mos",
@@ -673,9 +741,15 @@ def _build_paper_metrics(sheet: object) -> None:
         ),
         (
             "Jitter",
-            "RFC3550 jitter mean/P95/max and Jitter CDF",
-            "Inter-arrival jitter is a standard real-time media QoS indicator and directly supports distribution plots.",
-            "Use the CDF sheet for the main paper figure.",
+            "Audio jitter mean/P95/max and Jitter CDF",
+            "Relay mode uses the application timestamp estimator; WebRTC mode uses browser RTP audio jitter. Both support distribution plots.",
+            "Use the CDF sheet for the main paper figure and label the media mode in the figure legend.",
+        ),
+        (
+            "WebRTC media path",
+            "WebRTC RTT, packet loss, codec, and selected ICE candidate pair",
+            "Shows whether P2P media is using a direct or relayed candidate path and whether media loss affects QoE.",
+            "Use Client Summary for codec/candidate notes and Time Series or QoS Summary for packet-loss and RTT discussion.",
         ),
         (
             "Late delivery",
@@ -732,6 +806,7 @@ def _client_summary_row(client: ClientMetricState) -> MetricRow:
         "name": client.name,
         "room": client.room,
         "status": "active" if client.active else "disconnected",
+        "media_mode": str(latest.get("media_mode") or ""),
         "uptime_seconds": round(uptime, 3),
         "session_duration_seconds": _as_float(latest.get("session_duration_seconds")),
         "captured_frames": _as_int(latest.get("captured_frames")),
@@ -753,8 +828,19 @@ def _client_summary_row(client: ClientMetricState) -> MetricRow:
         "rtt_ms": _as_float(latest.get("rtt_ms")),
         "estimated_owd_ms": _as_float(latest.get("estimated_owd_ms")),
         "rfc3550_jitter_ms": _as_float(latest.get("rfc3550_jitter_ms")),
+        "websocket_rtt_ms": _as_float(latest.get("websocket_rtt_ms")),
+        "webrtc_packets_lost": _as_int(latest.get("webrtc_packets_lost")),
+        "webrtc_packet_loss_rate_percent": _as_float(latest.get("webrtc_packet_loss_rate_percent")),
+        "webrtc_jitter_ms": _as_float(latest.get("webrtc_jitter_ms")),
+        "webrtc_rtt_ms": _as_float(latest.get("webrtc_rtt_ms")),
+        "webrtc_codec": str(latest.get("webrtc_codec") or ""),
+        "webrtc_selected_candidate_pair": str(latest.get("webrtc_selected_candidate_pair") or ""),
+        "webrtc_local_candidate_type": str(latest.get("webrtc_local_candidate_type") or ""),
+        "webrtc_remote_candidate_type": str(latest.get("webrtc_remote_candidate_type") or ""),
+        "webrtc_candidate_protocol": str(latest.get("webrtc_candidate_protocol") or ""),
         "estimated_playout_latency_ms": _as_float(latest.get("estimated_playout_latency_ms")),
         "late_drop_rate_percent": _as_float(latest.get("late_drop_rate_percent")),
+        "media_impairment_rate_percent": _as_float(latest.get("media_impairment_rate_percent")),
         "buffer_underrun_rate_per_min": _as_float(latest.get("buffer_underrun_rate_per_min")),
         "r_factor": _as_float(latest.get("r_factor")),
         "estimated_mos": _as_float(latest.get("estimated_mos")),
@@ -801,6 +887,12 @@ def _append_positive(values: list[float], value: object) -> None:
         values.append(number)
 
 
+def _append_nonnegative(values: list[float], value: object) -> None:
+    number = _as_float(value)
+    if number >= 0:
+        values.append(number)
+
+
 def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
@@ -832,12 +924,12 @@ def _percentile(values: list[float], percentile: float) -> float:
     return round(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction, 3)
 
 
-def _client_sample_values(clients: list[ClientMetricState], field: str) -> list[float]:
+def _client_sample_values(clients: list[ClientMetricState], field: str, include_zero: bool = False) -> list[float]:
     values: list[float] = []
     for client in clients:
         for sample in client.samples:
             value = _as_float(sample.get(field))
-            if value > 0:
+            if value > 0 or (include_zero and field in sample and value == 0):
                 values.append(value)
     return values
 
